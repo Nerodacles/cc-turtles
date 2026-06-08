@@ -40,19 +40,22 @@ spec:
   ports:
     - { name: http, port: 80, targetPort: 8080 }
 ---
-# Traefik IngressRoute (WebSocket works over plain HTTP routing - no
-# special config needed; the upgrade is transparent). Adjust the host.
+# Traefik IngressRoute. Both entrypoints: behind Cloudflare the
+# WebSocket origin-pull is uncacheable and rides 443 (websecure), so
+# the route must exist there too (a web-only route 404s the WS upgrade
+# while the cached HTML still loads). tls:{} = Traefik default cert
+# (fine with Cloudflare "Full"); use a certResolver for a real cert.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: cc-turtles-dashboard
   namespace: devops
 spec:
-  entryPoints: [websecure]
+  entryPoints: [web, websecure]
   routes:
-    - match: Host(`turtles.example.com`)
+    - match: Host(`turtles.infra.com.do`)
       kind: Rule
       services:
         - name: cc-turtles-dashboard
           port: 80
-  # tls: { certResolver: your-resolver }
+  tls: {}

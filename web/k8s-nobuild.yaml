@@ -57,10 +57,14 @@ metadata:
   name: cc-turtles-dashboard
   namespace: devops
 spec:
-  entryPoints: [web]
+  # both entrypoints: Cloudflare's WebSocket origin-pull is uncacheable
+  # and rides 443 (websecure), so the route must exist there too.
+  # tls:{} uses Traefik's default cert (fine with Cloudflare "Full").
+  entryPoints: [web, websecure]
   routes:
     - kind: Rule
       match: Host(`turtles.infra.com.do`)
       services:
         - name: cc-turtles-dashboard
           port: 80
+  tls: {}
