@@ -9,6 +9,7 @@ local Nav   = require("nav")
 local Fuel  = require("fuel")
 local Swarm = require("swarm")
 local Trail = require("trail")
+local VERSION = require("version")
 
 local Service = {}
 
@@ -88,6 +89,7 @@ function Service.statusLoop()
             phase = Service.phase,
             fuel  = turtle.getFuelLevel(),
             inv   = Utils.invPercent(),
+            ver   = VERSION,
         }
     end)
 end

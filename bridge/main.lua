@@ -9,6 +9,7 @@
 
 package.path = package.path .. ";/lib/?.lua"
 local Swarm = require("swarm")
+local VERSION = require("version")
 
 -- Default server (override in /bridge.json -> { url = "wss://host" }).
 -- wss:// because the site is served over HTTPS - the browser uses wss
@@ -35,7 +36,7 @@ local function connect()
         print("[bridge] Connect failed: " .. tostring(err))
         return nil
     end
-    ws.send(textutils.serializeJSON({ type = "hello", role = "bridge" }))
+    ws.send(textutils.serializeJSON({ type = "hello", role = "bridge", ver = VERSION }))
     print("[bridge] Connected.")
     return ws
 end

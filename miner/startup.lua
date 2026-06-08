@@ -56,6 +56,7 @@ else
     local Swarm = require("swarm")
     local Nav   = require("nav")
     local Trail = require("trail")
+    local VERSION = require("version")
 
     -- Lost-turtle recovery: idle far from home with a trail? walk the
     -- journal backwards step by step (no GPS/facing trust needed).
@@ -161,6 +162,7 @@ else
                 phase = "ready",
                 fuel  = turtle.getFuelLevel(),
                 inv   = 0,
+                ver   = VERSION,
             }
         end)
     end

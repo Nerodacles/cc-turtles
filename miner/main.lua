@@ -11,6 +11,7 @@ local Nav   = require("nav")
 local Swarm = require("swarm")
 local Trail = require("trail")
 local Lane  = require("lane")
+local VERSION = require("version")
 
 -- ============================================================
 -- CONFIG
@@ -344,6 +345,7 @@ local function statusLoop()
             inv   = Utils.invPercent(),
             claim = state.center,  -- my zone, for the dashboard
             slot  = state.slot,
+            ver   = VERSION,
         }
     end)
 end

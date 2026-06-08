@@ -5,6 +5,7 @@ const STALE_MS = 15000;
 
 const turtles = new Map(); // id -> { data, last }
 let ws, reconnectT;
+let meta = { latest: "?", server: "?", bridge: null };
 
 // ---- WebSocket ------------------------------------------------------
 function connect() {
@@ -18,6 +19,8 @@ function connect() {
     if (m.type === "snapshot") {
       turtles.clear();
       for (const t of m.turtles) turtles.set(t.id, { data: t.data, last: Date.now() - (t.age || 0) });
+      meta = { latest: m.latest, server: m.server, bridge: m.bridge };
+      renderMeta();
     } else if (m.type === "status") {
       turtles.set(m.id, { data: m.data, last: Date.now() });
     } else if (m.type === "gone") {
@@ -30,6 +33,13 @@ function setConn(ok) {
   const el = document.getElementById("conn");
   el.textContent = ok ? "live" : "offline";
   el.className = "pill " + (ok ? "on" : "off");
+}
+function renderMeta() {
+  const v = document.getElementById("ver");
+  if (!v) return;
+  const bad = meta.bridge && meta.bridge !== meta.latest;
+  v.innerHTML = `latest <b>${esc(meta.latest)}</b>` +
+    (meta.bridge ? ` · bridge <span class="${bad ? "vbad" : ""}">${esc(meta.bridge)}</span>` : "");
 }
 function sendCmd(payload) {
   if (ws && ws.readyState === WebSocket.OPEN)
@@ -70,12 +80,14 @@ function renderList() {
     const c = roleColor(d.role);
     const slot = d.role === "miner" && d.slot != null ? " · zone " + d.slot : "";
     const inv = d.inv || 0;
+    const ver = d.ver
+      ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
     return `<div class="card ${stale ? "stale" : ""}">
       <span class="dot" style="background:${c}"></span>
       <div>
         <span class="name">${esc(d.label || id)}</span>
         <span class="role-tag" style="background:${c}22;color:${c}">${(d.role || "?")[0].toUpperCase()}</span>
-        <div class="sub">#${id} · ${esc(d.phase || "?")}${slot}</div>
+        <div class="sub">#${id} · ${esc(d.phase || "?")}${slot} ${ver}</div>
         <div class="bar"><i style="width:${inv}%;background:${c}"></i></div>
       </div>
       <div class="right">⛽ ${fmtFuel(d.fuel)}<br>📦 ${inv}%</div>

@@ -20,6 +20,18 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const STALE_MS = parseInt(process.env.STALE_MS || "20000", 10);
 const PUBLIC = path.join(__dirname, "public");
 
+// ---- LATEST version: read the single global lib/version.lua ---------
+// (the no-build pod clones the repo, so this file is right here)
+function readVersion() {
+  try {
+    const f = fs.readFileSync(path.join(__dirname, "..", "lib", "version.lua"), "utf8");
+    const m = f.match(/return\s*"([^"]+)"/);
+    return m ? m[1] : "?";
+  } catch { return "?"; }
+}
+const LATEST = readVersion();
+let bridgeVer = null;
+
 // ---- latest known state, keyed by turtle id -------------------------
 const turtles = new Map(); // id -> { data, last }
 
@@ -37,7 +49,8 @@ const server = http.createServer((req, res) => {
   // debug: current state (is the bridge forwarding turtle status?)
   if (urlPath === "/api/state") {
     const now = Date.now();
-    const out = { bridges: bridges.size, browsers: browsers.size, turtles: [] };
+    const out = { latest: LATEST, server: LATEST, bridge: bridgeVer,
+                  bridges: bridges.size, browsers: browsers.size, turtles: [] };
     for (const [id, t] of turtles) out.turtles.push({ id, label: t.data.label, role: t.data.role, age: now - t.last });
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(out, null, 2));
@@ -76,13 +89,14 @@ wss.on("connection", (ws) => {
       ws.role = msg.role === "bridge" ? "bridge" : "browser";
       if (ws.role === "bridge") {
         bridges.add(ws);
+        if (msg.ver) bridgeVer = msg.ver;
       } else {
         browsers.add(ws);
         // send the full current snapshot to the new tab
         const now = Date.now();
         const snap = [];
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
-        send(ws, { type: "snapshot", turtles: snap });
+        send(ws, { type: "snapshot", turtles: snap, latest: LATEST, server: LATEST, bridge: bridgeVer });
       }
       return;
     }
