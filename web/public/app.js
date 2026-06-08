@@ -102,10 +102,9 @@ function lockUI() {
   const locked = needKey && !cmdKey;
   document.getElementById("cmds").hidden = locked;
   document.getElementById("unlockBtn").hidden = !locked;
-  // detail command + exec sections follow the same gate (log stays visible)
-  const dc = document.getElementById("dcmds"), dx = document.getElementById("dexec");
+  // detail command section follows the same gate (log stays visible)
+  const dc = document.getElementById("dcmds");
   if (dc) dc.hidden = locked;
-  if (dx) dx.hidden = locked;
 }
 function unlock() {
   const k = prompt("Command key:");
@@ -165,17 +164,10 @@ document.getElementById("list").addEventListener("click", (e) => {
   const card = e.target.closest(".card[data-id]");
   if (card) openDetail(+card.dataset.id);
 });
-// targeted commands + remote exec
+// targeted commands (pause/resume/home/update for this turtle)
 document.querySelectorAll(".dcmds button[data-tcmd]").forEach((b) =>
   b.addEventListener("click", () => { if (watchId != null) sendCmd({ cmd: b.dataset.tcmd, id: watchId }); })
 );
-function runExec() {
-  const inp = document.getElementById("dExec");
-  const code = inp.value.trim();
-  if (code && watchId != null) { sendCmd({ cmd: "exec", id: watchId, code }); inp.value = ""; }
-}
-document.getElementById("dRun").addEventListener("click", runExec);
-document.getElementById("dExec").addEventListener("keydown", (e) => { if (e.key === "Enter") runExec(); });
 
 // ---- commands -------------------------------------------------------
 // 'update' disables its button until every live turtle reports the

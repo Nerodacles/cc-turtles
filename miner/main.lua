@@ -340,17 +340,7 @@ local function listener()
         -- Keyed commands only: other players' pockets are ignored.
         -- A command with msg.id targets ONE turtle; without it, all.
         if Swarm.ok(msg) and (not msg.id or msg.id == os.getComputerID()) then
-            if msg.cmd == "exec" and msg.code then
-                -- Remote console: run Lua, output goes to the log
-                print("> " .. msg.code)
-                local fn, err = load(msg.code, "exec")
-                if not fn then print("[exec] " .. tostring(err))
-                else
-                    local ok, r = pcall(fn)
-                    if not ok then print("[exec] error: " .. tostring(r))
-                    elseif r ~= nil then print("[exec] = " .. tostring(r)) end
-                end
-            elseif msg.cmd == "mine_at" and msg.pos then
+            if msg.cmd == "mine_at" and msg.pos then
                 -- New entry point: applies to the NEXT mission (floored:
                 -- pocket fixes are the player's float position)
                 Utils.writeJSON("/site.json", {

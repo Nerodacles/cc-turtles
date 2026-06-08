@@ -103,7 +103,3 @@ main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; 
   line-height: 1.45; white-space: pre-wrap; word-break: break-word;
   color: #b7c1cf; background: #0d1117;
 }
-.dexec { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); }
-.dexec input { flex: 1; background: #0d1117; border: 1px solid var(--line);
-  color: var(--ink); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
-.dexec button { padding: 6px 12px; }
