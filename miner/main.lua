@@ -78,6 +78,19 @@ local function noteOre(name)
     }
 end
 
+-- Dead-reckoned absolute position (same math as noteOre). GPS dies
+-- underground, so the heartbeat falls back to this to keep the miner
+-- on the dashboard map while it's actually mining.
+local function deadPos()
+    if not state.center then return nil end
+    local r = state.room or {}
+    return {
+        x = state.center.x + (r.px or 0),
+        y = (state.topY or MINING_Y) - (state.depth or 0),
+        z = state.center.z + (r.pz or 0),
+    }
+end
+
 -- Home persists across missions
 local home = Utils.readJSON(HOME_FILE)
 
@@ -390,6 +403,8 @@ local function statusLoop()
             slot  = state.slot,
             site  = state.site,    -- for the server's zone-claim renewal
             zoneIdx = state.slot,
+            pos   = deadPos(),     -- GPS overrides this above ground
+
             ver   = VERSION,
             ores  = (#ob > 0) and ob or nil,
             log   = Log.flush(),
@@ -937,8 +952,15 @@ local function relocateToNewZone()
     walkTo(state.shaft.x, state.shaft.z, "zx")  -- back to the hub
 
     -- atomic: mark this zone done AND get the next free one
+    local oldSlot = state.slot
     local idx = acquireZone(state.slot)
-    if idx == nil then idx = negotiateSlot() end  -- no server: best-effort
+    if idx == nil then
+        -- no server: best-effort. negotiateSlot ranks among peers and
+        -- our own just-vacated slot reads as free, so it can hand back
+        -- the SAME exhausted zone -> tight re-mine loop. Force forward.
+        idx = negotiateSlot()
+        if idx == oldSlot then idx = oldSlot + 1 end
+    end
     if idx == nil then return false end
     setZone(idx)
 

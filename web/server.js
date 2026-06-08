@@ -64,9 +64,12 @@ function allocZone(site, miner) {
   const k = siteKey(site);
   const z = (zones[k] ||= { done: {}, claims: {} });
   const now = Date.now();
-  // resume an existing live claim for this miner
+  // resume an existing live claim for this miner (but never resume onto
+  // a zone that's already done - a stale heartbeat could have parked the
+  // claim on a finished idx; fall through to a fresh alloc instead)
   const mine = z.claims[miner];
-  if (mine && now - mine.ts < CLAIM_TTL) { mine.ts = now; saveZones(); return mine.idx; }
+  if (mine && now - mine.ts < CLAIM_TTL && !z.done[mine.idx]) { mine.ts = now; saveZones(); return mine.idx; }
+  if (mine && z.done[mine.idx]) delete z.claims[miner];
   // prune stale claims
   for (const [m, c] of Object.entries(z.claims)) if (now - c.ts >= CLAIM_TTL) delete z.claims[m];
   const taken = new Set(Object.values(z.claims).map((c) => c.idx));
@@ -85,6 +88,9 @@ function doneZone(site, miner, idx) {
 function touchClaim(site, miner, idx) { // renew from heartbeat
   if (!site || idx == null) return;
   const z = (zones[siteKey(site)] ||= { done: {}, claims: {} });
+  // ignore a stale heartbeat still reporting a finished zone - otherwise
+  // it would resurrect the claim onto a done idx and desync the taken set
+  if (z.done[idx]) return;
   z.claims[miner] = { idx, ts: Date.now() };
   saveZones();
 }

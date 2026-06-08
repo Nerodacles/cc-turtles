@@ -48,12 +48,14 @@ function Swarm.setKey(k)
 end
 
 -- Broadcast a status table every `interval` seconds. `info` is a
--- function returning the table; pos is filled in automatically.
+-- function returning the table. GPS fills pos when there's signal;
+-- underground (no GPS) we keep whatever pos info() supplied (e.g. a
+-- miner's dead-reckoned position) so the dashboard map still tracks it.
 function Swarm.heartbeat(interval, info)
     while true do
         local x, y, z = gps.locate(1)
         local msg = info()
-        msg.pos = x and { x = x, y = y, z = z } or nil
+        if x then msg.pos = { x = x, y = y, z = z } end
         Swarm.bcast(msg, Swarm.PROTO_STATUS)
         os.sleep(interval)
     end
