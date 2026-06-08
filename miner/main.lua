@@ -292,11 +292,15 @@ local function setZone(idx)
 end
 
 -- Ask the SERVER (via the bridge) for the next free zone index - it is
--- authoritative and persisted, so done zones are never re-mined. Falls
--- back to decentralized local negotiation if no server/bridge answers.
-local function acquireZone()
+-- authoritative and persisted, so done zones are never re-mined. Pass
+-- doneIdx to ATOMICALLY mark that zone done first (op "next") - a
+-- separate done+request would race and resume the just-finished zone.
+-- Falls back to decentralized local negotiation if no server answers.
+-- Returns the server-granted idx, or nil if no server/bridge answers.
+local function acquireZone(doneIdx)
     currentPhase = "zoning"
-    rednet.broadcast({ op = "request", site = state.site }, "swarm_zone")
+    rednet.broadcast({ op = doneIdx and "next" or "request",
+                       site = state.site, idx = doneIdx }, "swarm_zone")
     local deadline = os.clock() + 4
     while os.clock() < deadline do
         local _, m = rednet.receive("swarm_zone", 0.5)
@@ -305,14 +309,7 @@ local function acquireZone()
             return m.idx
         end
     end
-    print("[zone] No server - decentralized negotiation")
-    return negotiateSlot()
-end
-
--- Tell the server a zone is fully mined (so nobody re-mines it)
-local function reportZoneDone(idx)
-    if idx == nil then return end
-    rednet.broadcast({ op = "done", site = state.site, idx = idx }, "swarm_zone")
+    return nil
 end
 
 -- Answer slot queries/claims (latecomers and claim-verifiers learn
@@ -949,8 +946,9 @@ local function relocateToNewZone()
     end
     walkTo(state.shaft.x, state.shaft.z, "zx")  -- back to the hub
 
-    reportZoneDone(state.slot)
-    local idx = acquireZone()
+    -- atomic: mark this zone done AND get the next free one
+    local idx = acquireZone(state.slot)
+    if idx == nil then idx = negotiateSlot() end  -- no server: best-effort
     if idx == nil then return false end
     setZone(idx)
 
@@ -1101,8 +1099,13 @@ local function mission()
         print("[init] Home saved: " .. home.x .. "," .. home.y .. "," .. home.z)
     end
     if not state.slot then
-        setZone(acquireZone())
+        -- fresh: ask the server, else decentralized fallback
+        setZone(acquireZone() or negotiateSlot())
     end
+    -- (resume keeps its saved slot; the server resumes the same claim
+    -- if still held. A >30min crash can free it and let another miner
+    -- take the zone - a rare, non-destructive overlap that the
+    -- empty-skip + jiggle resolve on their own.)
 
     if state.phase == "goto" then
         currentPhase = "goto"

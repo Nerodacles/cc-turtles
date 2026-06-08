@@ -212,12 +212,12 @@ wss.on("connection", (ws) => {
     if (ws.role === "bridge" && msg.type === "zone" && msg.site && msg.miner != null) {
       if (msg.op === "done") {
         doneZone(msg.site, msg.miner, msg.idx);
-        broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
-      } else { // request
+      } else { // "request" (first) or "next" (mark idx done, then alloc) - atomic
+        if (msg.op === "next" && msg.idx != null) doneZone(msg.site, msg.miner, msg.idx);
         const idx = allocZone(msg.site, msg.miner);
         send(ws, { type: "zone_grant", miner: msg.miner, idx });
-        broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
       }
+      broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
       return;
     }
 
