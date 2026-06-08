@@ -47,8 +47,9 @@ function connect() {
     } else if (m.type === "auth_ok") {
       localStorage.setItem("cmdkey", cmdKey);
       lockUI();
+      if (pendingOpen != null) { const id = pendingOpen; pendingOpen = null; openDetail(id); }
     } else if (m.type === "auth_fail") {
-      cmdKey = ""; lockUI(); alert("Wrong key.");
+      cmdKey = ""; pendingOpen = null; lockUI(); alert("Wrong key.");
     } else if (m.type === "denied") {
       lock(); alert("Command denied — key required.");
     } else if (m.type === "status") {
@@ -117,6 +118,7 @@ function unlock() {
 function lock() {
   cmdKey = "";
   localStorage.removeItem("cmdkey");
+  if (watchId != null) closeDetail();  // the log needs the key too
   lockUI();
 }
 document.getElementById("unlockBtn").addEventListener("click", unlock);
@@ -140,14 +142,16 @@ function updateDetailHeader() {
   document.getElementById("dName").textContent =
     (d && d.label || ("#" + watchId)) + (d ? ` · ${d.role || "?"} · ${d.phase || "?"}` : "");
 }
+let pendingOpen = null;
 function openDetail(id) {
+  if (needKey && !cmdKey) { pendingOpen = id; unlock(); return; }  // key first
   watchId = id;
   document.getElementById("detail").hidden = false;
   document.getElementById("dLog").textContent = "loading…";
   updateDetailHeader();
-  lockUI();  // show/hide the detail command + exec sections
+  renderList();  // highlight the selected card
   if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({ type: "watch", id }));
+    ws.send(JSON.stringify({ type: "watch", id, key: cmdKey }));
 }
 function closeDetail() {
   watchId = null;
@@ -197,30 +201,41 @@ function fmtFuel(f) {
 }
 function roleColor(r) { return ROLE_COLOR[r] || "#8b97a7"; }
 
+function cardHtml(id, now) {
+  const t = turtles.get(id), d = t.data;
+  const stale = now - t.last > STALE_MS;
+  const c = roleColor(d.role);
+  const slot = d.role === "miner" && d.slot != null ? " · zone " + d.slot : "";
+  const inv = d.inv || 0;
+  const ver = d.ver
+    ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
+  return `<div class="card ${stale ? "stale" : ""} ${id === watchId ? "sel" : ""}" data-id="${id}">
+    <span class="dot" style="background:${c}"></span>
+    <div>
+      <span class="name">${esc(d.label || id)}</span>
+      <div class="sub">#${id} · ${esc(d.phase || "?")}${slot} ${ver}</div>
+      <div class="bar"><i style="width:${inv}%;background:${c}"></i></div>
+    </div>
+    <div class="right">⛽ ${fmtFuel(d.fuel)}<br>📦 ${inv}%</div>
+  </div>`;
+}
 function renderList() {
   const now = Date.now();
-  const ids = [...turtles.keys()].sort((a, b) => a - b);
+  const ids = [...turtles.keys()];
   document.getElementById("count").textContent = ids.length + " turtles";
-  const html = ids.map((id) => {
-    const t = turtles.get(id), d = t.data;
-    const stale = now - t.last > STALE_MS;
-    const c = roleColor(d.role);
-    const slot = d.role === "miner" && d.slot != null ? " · zone " + d.slot : "";
-    const inv = d.inv || 0;
-    const ver = d.ver
-      ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
-    return `<div class="card ${stale ? "stale" : ""}" data-id="${id}">
-      <span class="dot" style="background:${c}"></span>
-      <div>
-        <span class="name">${esc(d.label || id)}</span>
-        <span class="role-tag" style="background:${c}22;color:${c}">${(d.role || "?")[0].toUpperCase()}</span>
-        <div class="sub">#${id} · ${esc(d.phase || "?")}${slot} ${ver}</div>
-        <div class="bar"><i style="width:${inv}%;background:${c}"></i></div>
-      </div>
-      <div class="right">⛽ ${fmtFuel(d.fuel)}<br>📦 ${inv}%</div>
-    </div>`;
-  }).join("");
-  document.getElementById("list").innerHTML = html || `<div class="card"><div class="sub">no turtles reporting…</div></div>`;
+  const groups = { miner: [], courier: [], fueler: [], other: [] };
+  for (const id of ids) (groups[turtles.get(id).data.role] || groups.other).push(id);
+  const titles = { miner: "⛏ Miners", courier: "📦 Couriers", fueler: "⛽ Fuelers", other: "• Other" };
+  let html = "";
+  for (const role of ["miner", "courier", "fueler", "other"]) {
+    const g = groups[role];
+    if (!g.length) continue;
+    g.sort((a, b) => a - b);
+    html += `<div class="group" style="color:${roleColor(role)}">${titles[role]} · ${g.length}</div>`;
+    html += g.map((id) => cardHtml(id, now)).join("");
+  }
+  document.getElementById("list").innerHTML =
+    html || `<div class="card"><div class="sub">no turtles reporting…</div></div>`;
 }
 function esc(s) { return String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
 

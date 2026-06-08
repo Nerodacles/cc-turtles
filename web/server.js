@@ -222,8 +222,10 @@ wss.on("connection", (ws) => {
     }
 
     // A browser watches one turtle's log: send the stored log, then
-    // stream live appends for that id only
+    // stream live appends for that id only. Requires the command key
+    // (the log is only visible to authorized users).
     if (ws.role === "browser" && msg.type === "watch") {
+      if (CMD_KEY && msg.key !== CMD_KEY) { ws.watching = null; return; }
       ws.watching = msg.id;
       if (msg.id != null) send(ws, { type: "log", id: msg.id, full: true, lines: logs.get(msg.id) || [] });
       return;
