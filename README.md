@@ -53,12 +53,12 @@ cd web && docker compose up --build      # http://localhost:8080
 ```
 or on the cluster: build/push the image and `kubectl apply -f web/k8s.yaml` (Traefik IngressRoute included; WebSockets route transparently).
 
-**Bridge** — one CC computer/turtle with a wireless modem + HTTP, in rednet range of the swarm (next to a GPS repeater is ideal). Tell it the server URL, then install:
+**Bridge** — one CC computer/turtle with a wireless modem + HTTP, in rednet range of the swarm (next to a GPS repeater is ideal). It defaults to `wss://turtles.infra.com.do`; install:
 ```
-edit bridge.json      ->  { url = "ws://your-server:8080" }
 wget https://raw.githubusercontent.com/Nerodacles/cc-turtles/main/bridge/startup.lua startup.lua
 reboot
 ```
+To point it elsewhere: `edit bridge.json` → `{ url = "wss://your-host" }` (use `wss://` for an HTTPS site, `ws://` for plain HTTP).
 The bridge re-signs web commands with the swarm key, so the dashboard inherits the same auth as the pocket. If you rotated the key (`k`), give the bridge the same `secret.json`.
 
 ## Security (other players)

@@ -10,8 +10,10 @@
 package.path = package.path .. ";/lib/?.lua"
 local Swarm = require("swarm")
 
--- Set the server URL in /bridge.json -> { url = "ws://host:8080" }
-local URL = "ws://localhost:8080"
+-- Default server (override in /bridge.json -> { url = "wss://host" }).
+-- wss:// because the site is served over HTTPS - the browser uses wss
+-- too, so the bridge must match (ws:// would be mixed-content).
+local URL = "wss://turtles.infra.com.do"
 if fs.exists("/bridge.json") then
     local f = fs.open("/bridge.json", "r")
     local c = textutils.unserialize(f.readAll())

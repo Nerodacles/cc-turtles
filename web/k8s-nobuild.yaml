@@ -1,0 +1,66 @@
+# No-build deploy: a node:22-alpine pod clones the public repo and runs
+# the server (no registry/docker needed). Tailscale Ingress, matching
+# the devops kite/uptime-kuma pattern. For production, build a real
+# image (web/Dockerfile) and use web/k8s.yaml instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cc-turtles-dashboard
+  namespace: devops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: cc-turtles-dashboard }
+  template:
+    metadata:
+      labels: { app: cc-turtles-dashboard }
+    spec:
+      containers:
+        - name: dashboard
+          image: node:22-alpine
+          workingDir: /app
+          command: ["/bin/sh", "-c"]
+          args:
+            - >
+              apk add --no-cache git &&
+              git clone --depth 1 https://github.com/Nerodacles/cc-turtles /src &&
+              cp -r /src/web/* /app/ &&
+              npm install --omit=dev &&
+              node server.js
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: STALE_MS, value: "20000" }
+          ports: [{ containerPort: 8080 }]
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cc-turtles-dashboard
+  namespace: devops
+spec:
+  selector: { app: cc-turtles-dashboard }
+  ports:
+    - { name: http, port: 80, targetPort: 8080 }
+---
+# Traefik IngressRoute (public). WebSocket upgrades pass through the
+# HTTP 'web' entrypoint transparently - no middleware needed.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: cc-turtles-dashboard
+  namespace: devops
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`turtles.infra.com.do`)
+      services:
+        - name: cc-turtles-dashboard
+          port: 80
