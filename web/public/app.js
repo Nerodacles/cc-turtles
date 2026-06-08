@@ -4,8 +4,18 @@ const ROLE_COLOR = { miner: "#3fb950", courier: "#58a6ff", fueler: "#d29922" };
 const STALE_MS = 15000;
 
 const turtles = new Map(); // id -> { data, last }
+const ores = [];           // { n, x, y, z }
 let ws, reconnectT;
 let meta = { latest: "?", server: "?", bridge: null };
+
+// ore name -> color (drops the minecraft:/_ore already)
+const ORE_COLOR = {
+  diamond: "#4ee6e6", emerald: "#3fe06b", ancient_debris: "#a8682f",
+  debris: "#a8682f", gold: "#f2c14e", nether_gold: "#f2c14e",
+  iron: "#d8b89a", copper: "#e0794a", redstone: "#f3534a",
+  lapis: "#3b6fe0", coal: "#5b6470", quartz: "#e8e2d8",
+};
+const oreColor = (n) => ORE_COLOR[n] || "#c0c8d4";
 
 // ---- WebSocket ------------------------------------------------------
 function connect() {
@@ -20,9 +30,14 @@ function connect() {
       turtles.clear();
       for (const t of m.turtles) turtles.set(t.id, { data: t.data, last: Date.now() - (t.age || 0) });
       meta = { latest: m.latest, server: m.server, bridge: m.bridge };
+      ores.length = 0;
+      if (Array.isArray(m.ores)) for (const o of m.ores) ores.push(o);
       renderMeta();
     } else if (m.type === "status") {
       turtles.set(m.id, { data: m.data, last: Date.now() });
+    } else if (m.type === "ores") {
+      for (const o of m.ores) ores.push(o);
+      if (ores.length > 4000) ores.splice(0, ores.length - 4000);
     } else if (m.type === "gone") {
       turtles.delete(m.id);
     }
@@ -147,6 +162,14 @@ function renderMap() {
     for (let gy = (Y(cz) % step + h) % step; gy < h; gy += step) line(0, gy, w, gy);
   }
 
+  // discovered ores (under the turtles)
+  for (const o of ores) {
+    const ox = X(o.x), oy = Y(o.z);
+    if (ox < -4 || ox > w + 4 || oy < -4 || oy > h + 4) continue;
+    ctx.fillStyle = oreColor(o.n);
+    ctx.fillRect(ox - 1.5, oy - 1.5, 3, 3);
+  }
+
   // turtles
   const now = Date.now();
   for (const t of pts) {
@@ -171,7 +194,20 @@ function renderMap() {
   function line(a, b, c2, d2) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d2); ctx.stroke(); }
 }
 
-function render() { renderList(); renderMap(); }
+function renderLegend() {
+  const el = document.getElementById("legend");
+  if (!el) return;
+  if (!ores.length) { el.innerHTML = ""; return; }
+  const counts = {};
+  for (const o of ores) counts[o.n] = (counts[o.n] || 0) + 1;
+  const rows = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  el.innerHTML = rows.map(([n, c]) =>
+    `<div class="row"><span class="sw" style="background:${oreColor(n)}"></span>` +
+    `<span class="n">${esc(n)}</span><span class="c">${c}</span></div>`).join("") +
+    `<div class="row tot"><span class="n">found</span><span class="c">${ores.length}</span></div>`;
+}
+
+function render() { renderList(); renderMap(); renderLegend(); }
 
 fit(); connect();
 setInterval(render, 1000); // refresh stale fades + ages

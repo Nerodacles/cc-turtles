@@ -62,6 +62,20 @@ local currentPhase   = "boot"
 local lastCourierTry = -COURIER_COOLDOWN
 local lastFuelTry    = -COURIER_COOLDOWN
 
+-- Discovered-ore buffer: each found ore's world position (dead-reckoned
+-- from the zone center + room offset + depth, so no GPS cost per block).
+-- Flushed into the status heartbeat for the dashboard's live ore map.
+local oreBuffer = {}
+local function noteOre(name)
+    if #oreBuffer >= 60 then return end
+    oreBuffer[#oreBuffer + 1] = {
+        n = (name:gsub("minecraft:", ""):gsub("_ore", "")),
+        x = (state.center and state.center.x or 0) + state.room.px,
+        y = (state.topY or MINING_Y) - state.depth,
+        z = (state.center and state.center.z or 0) + state.room.pz,
+    }
+end
+
 -- Home persists across missions
 local home = Utils.readJSON(HOME_FILE)
 
@@ -337,6 +351,7 @@ end
 
 local function statusLoop()
     Swarm.heartbeat(STATUS_INTERVAL, function()
+        local ob = oreBuffer; oreBuffer = {}  -- flush discovered ores
         return {
             role  = "miner",
             label = os.getComputerLabel() or ("miner-" .. os.getComputerID()),
@@ -346,6 +361,7 @@ local function statusLoop()
             claim = state.center,  -- my zone, for the dashboard
             slot  = state.slot,
             ver   = VERSION,
+            ores  = (#ob > 0) and ob or nil,
         }
     end)
 end
@@ -394,6 +410,7 @@ local function veinMine(depth)
     local ok, b = turtle.inspectUp()
     if ok and Utils.isOre(b.name, b.tags) then
         Utils.record(state, b.name)
+        noteOre(b.name)
         turtle.digUp()
         if safeAfterDig(turtle.inspectUp, turtle.placeUp) and turtle.up() then
             Trail.record("U")
@@ -405,6 +422,7 @@ local function veinMine(depth)
     ok, b = turtle.inspectDown()
     if ok and Utils.isOre(b.name, b.tags) then
         Utils.record(state, b.name)
+        noteOre(b.name)
         turtle.digDown()
         if safeAfterDig(turtle.inspectDown, turtle.placeDown) and turtle.down() then
             Trail.record("D")
@@ -417,6 +435,7 @@ local function veinMine(depth)
         ok, b = turtle.inspect()
         if ok and Utils.isOre(b.name, b.tags) then
             Utils.record(state, b.name)
+            noteOre(b.name)
             turtle.dig()
             if safeAfterDig(turtle.inspect, turtle.place) and turtle.forward() then
                 Trail.record(tostring(Nav.facing))
@@ -690,7 +709,8 @@ local function clearVert(inspect, dig, place)
     Utils.record(state, b.name)
     dig()
     levelMined = levelMined + 1
-    return Utils.isOre(b.name, b.tags)
+    if Utils.isOre(b.name, b.tags) then noteOre(b.name); return true end
+    return false
 end
 
 -- One serpentine step. `fast` = catch-up over already-cleared cells
@@ -722,7 +742,7 @@ local function roomStep(fast)
             elseif not turtle.detect() then
                 break
             else
-                if Utils.isOre(b.name, b.tags) then sawOre = true end
+                if Utils.isOre(b.name, b.tags) then sawOre = true; noteOre(b.name) end
                 Utils.record(state, b.name)
                 turtle.dig()
                 levelMined = levelMined + 1

@@ -34,6 +34,8 @@ let bridgeVer = null;
 
 // ---- latest known state, keyed by turtle id -------------------------
 const turtles = new Map(); // id -> { data, last }
+const ores = [];           // discovered ores: { n, x, y, z } (capped FIFO)
+const ORE_CAP = 4000;
 
 // ---- static file server --------------------------------------------
 const MIME = {
@@ -107,12 +109,22 @@ wss.on("connection", (ws) => {
         const now = Date.now();
         const snap = [];
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
-        send(ws, { type: "snapshot", turtles: snap, latest: LATEST, server: LATEST, bridge: bridgeVer });
+        send(ws, { type: "snapshot", turtles: snap, ores, latest: LATEST, server: LATEST, bridge: bridgeVer });
       }
       return;
     }
 
     if (ws.role === "bridge" && msg.type === "status" && msg.id != null) {
+      // pull discovered ores out of the heartbeat into the shared map
+      const newOres = Array.isArray(msg.data.ores) ? msg.data.ores : null;
+      if (newOres) {
+        delete msg.data.ores;
+        for (const o of newOres) {
+          ores.push(o);
+          if (ores.length > ORE_CAP) ores.shift();
+        }
+        broadcast(browsers, { type: "ores", ores: newOres });
+      }
       turtles.set(msg.id, { data: msg.data, last: Date.now() });
       broadcast(browsers, { type: "status", id: msg.id, data: msg.data });
       return;

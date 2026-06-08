@@ -40,6 +40,18 @@ main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; 
   position: absolute; left: 10px; bottom: 8px; color: var(--dim);
   font-size: 11px; pointer-events: none; opacity: .7;
 }
+#legend {
+  position: absolute; right: 10px; top: 10px; display: flex;
+  flex-direction: column; gap: 3px; font-size: 11px;
+  background: #0d1117cc; border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px 9px; pointer-events: none;
+}
+#legend .row { display: flex; align-items: center; gap: 6px; }
+#legend .sw { width: 9px; height: 9px; border-radius: 2px; }
+#legend .n { color: var(--ink); min-width: 70px; }
+#legend .c { color: var(--dim); margin-left: auto; }
+#legend .tot { color: var(--dim); border-top: 1px solid var(--line);
+  margin-top: 3px; padding-top: 3px; }
 
 #list { overflow-y: auto; border-left: 1px solid var(--line); background: var(--panel); }
 .card {
