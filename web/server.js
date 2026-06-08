@@ -34,6 +34,14 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+  // debug: current state (is the bridge forwarding turtle status?)
+  if (urlPath === "/api/state") {
+    const now = Date.now();
+    const out = { bridges: bridges.size, browsers: browsers.size, turtles: [] };
+    for (const [id, t] of turtles) out.turtles.push({ id, label: t.data.label, role: t.data.role, age: now - t.last });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(out, null, 2));
+  }
   if (urlPath === "/") urlPath = "/index.html";
   const file = path.join(PUBLIC, path.normalize(urlPath).replace(/^(\.\.[/\\])+/, ""));
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end("forbidden"); }

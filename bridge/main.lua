@@ -44,7 +44,10 @@ end
 local function pumpRednet(ws)
     while true do
         local id, msg, proto = rednet.receive()
-        if proto == Swarm.PROTO_STATUS and Swarm.ok(msg) then
+        -- Forward any status heartbeat for DISPLAY (no key required -
+        -- it's read-only telemetry; commands still need the key). This
+        -- way the dashboard fills even if the bridge's key differs.
+        if proto == Swarm.PROTO_STATUS and type(msg) == "table" and msg.role then
             local ok = pcall(ws.send, textutils.serializeJSON({
                 type = "status", id = id, data = msg,
             }))
