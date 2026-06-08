@@ -60,9 +60,17 @@ function saveZones() { // debounced write
   }, 500);
 }
 function siteKey(s) { return `${s.x},${s.y},${s.z}`; }
+// every zone record has { done, claims, prog }. prog[idx] = deepest Y
+// mined for that index (lower = deeper), so a wiped/replaced miner that
+// re-takes the idx resumes the layer instead of re-mining from the top.
+function zoneRec(k) {
+  const z = (zones[k] ||= { done: {}, claims: {}, prog: {} });
+  z.done ||= {}; z.claims ||= {}; z.prog ||= {}; // heal old PVC records
+  return z;
+}
 function allocZone(site, miner) {
   const k = siteKey(site);
-  const z = (zones[k] ||= { done: {}, claims: {} });
+  const z = zoneRec(k);
   const now = Date.now();
   // resume an existing live claim for this miner (but never resume onto
   // a zone that's already done - a stale heartbeat could have parked the
@@ -85,12 +93,15 @@ function doneZone(site, miner, idx) {
   if (z.claims[miner] && z.claims[miner].idx === idx) delete z.claims[miner];
   saveZones();
 }
-function touchClaim(site, miner, idx) { // renew from heartbeat
+function touchClaim(site, miner, idx, level) { // renew from heartbeat
   if (!site || idx == null) return;
-  const z = (zones[siteKey(site)] ||= { done: {}, claims: {} });
+  const z = zoneRec(siteKey(site));
+  // record the deepest layer for this idx (lower Y = deeper). Done even
+  // for finished zones - it's the historical depth, harmless.
+  if (level != null && (z.prog[idx] == null || level < z.prog[idx])) z.prog[idx] = level;
   // ignore a stale heartbeat still reporting a finished zone - otherwise
   // it would resurrect the claim onto a done idx and desync the taken set
-  if (z.done[idx]) return;
+  if (z.done[idx]) { saveZones(); return; }
   z.claims[miner] = { idx, ts: Date.now() };
   saveZones();
 }
@@ -196,9 +207,9 @@ wss.on("connection", (ws) => {
         // stream only to browsers watching this turtle
         for (const b of browsers) if (b.watching === msg.id) send(b, { type: "log", id: msg.id, lines: newLog });
       }
-      // renew this miner's zone claim from its heartbeat
+      // renew this miner's zone claim + record its mined layer
       if (msg.data.role === "miner" && msg.data.site && msg.data.zoneIdx != null)
-        touchClaim(msg.data.site, msg.id, msg.data.zoneIdx);
+        touchClaim(msg.data.site, msg.id, msg.data.zoneIdx, msg.data.level);
       turtles.set(msg.id, { data: msg.data, last: Date.now() });
       broadcast(browsers, { type: "status", id: msg.id, data: msg.data });
       return;
@@ -212,7 +223,10 @@ wss.on("connection", (ws) => {
       } else { // "request" (first) or "next" (mark idx done, then alloc) - atomic
         if (msg.op === "next" && msg.idx != null) doneZone(msg.site, msg.miner, msg.idx);
         const idx = allocZone(msg.site, msg.miner);
-        send(ws, { type: "zone_grant", miner: msg.miner, idx });
+        // hand back the deepest known layer so the miner can resume it
+        const zr = zones[siteKey(msg.site)];
+        const level = zr && zr.prog ? zr.prog[idx] : null;
+        send(ws, { type: "zone_grant", miner: msg.miner, idx, level: level == null ? null : level });
       }
       broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
       return;

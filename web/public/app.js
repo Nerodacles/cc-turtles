@@ -54,6 +54,15 @@ function connect() {
       lock(); alert("Command denied — key required.");
     } else if (m.type === "status") {
       turtles.set(m.id, { data: m.data, last: Date.now() });
+      // mirror the server's deepest-layer record locally (no extra
+      // traffic): keeps the detail "resume Y" fresh between zone ops
+      const d = m.data;
+      if (d.role === "miner" && d.site && d.slot != null && d.level != null) {
+        const k = `${d.site.x},${d.site.y},${d.site.z}`;
+        const z = (zonesData[k] ||= { done: {}, claims: {}, prog: {} });
+        z.prog ||= {};
+        if (z.prog[d.slot] == null || d.level < z.prog[d.slot]) z.prog[d.slot] = d.level;
+      }
       if (m.id === watchId) updateDetailHeader();
     } else if (m.type === "log") {
       if (m.id !== watchId) return;
@@ -138,8 +147,16 @@ function sendCmd(payload) {
 function updateDetailHeader() {
   const t = turtles.get(watchId);
   const d = t && t.data;
+  let extra = "";
+  if (d && d.role === "miner") {
+    if (d.level != null) extra += ` · Y${d.level}`;
+    // deepest layer the server has stored for this zone (the resume point)
+    const z = d.site && zonesData[`${d.site.x},${d.site.y},${d.site.z}`];
+    const deep = z && z.prog && d.slot != null ? z.prog[d.slot] : null;
+    if (deep != null) extra += ` · resume Y${deep}`;
+  }
   document.getElementById("dName").textContent =
-    (d && d.label || ("#" + watchId)) + (d ? ` · ${d.role || "?"} · ${d.phase || "?"}` : "");
+    (d && d.label || ("#" + watchId)) + (d ? ` · ${d.role || "?"} · ${d.phase || "?"}${extra}` : "");
 }
 let pendingOpen = null;
 function openDetail(id) {
@@ -222,6 +239,8 @@ function cardHtml(id, now) {
   const stale = now - t.last > STALE_MS;
   const c = roleColor(d.role);
   const slot = d.role === "miner" && d.slot != null ? " · zone " + d.slot : "";
+  // current mining layer (the server persists the deepest per zone)
+  const layer = d.role === "miner" && d.level != null ? " · Y" + d.level : "";
   const inv = d.inv || 0;
   const ver = d.ver
     ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
@@ -229,7 +248,7 @@ function cardHtml(id, now) {
     <span class="dot" style="background:${c}"></span>
     <div>
       <span class="name">${esc(d.label || id)}</span>
-      <div class="sub">#${id} · ${esc(d.phase || "?")}${slot} ${ver}</div>
+      <div class="sub">#${id} · ${esc(d.phase || "?")}${slot}${layer} ${ver}</div>
       <div class="bar"><i style="width:${inv}%;background:${c}"></i></div>
     </div>
     <div class="right">⛽ ${fmtFuel(d.fuel)}<br>📦 ${inv}%</div>

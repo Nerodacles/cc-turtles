@@ -309,7 +309,9 @@ end
 -- doneIdx to ATOMICALLY mark that zone done first (op "next") - a
 -- separate done+request would race and resume the just-finished zone.
 -- Falls back to decentralized local negotiation if no server answers.
--- Returns the server-granted idx, or nil if no server/bridge answers.
+-- Returns (idx, level): idx is the granted zone, level is the deepest Y
+-- the server has on record for it (nil/fresh = mine from the top). Both
+-- nil if no server/bridge answers.
 local function acquireZone(doneIdx)
     currentPhase = "zoning"
     Swarm.bcast({ op = doneIdx and "next" or "request",
@@ -318,8 +320,9 @@ local function acquireZone(doneIdx)
     while os.clock() < deadline do
         local _, m = rednet.receive("swarm_zone", 0.5)
         if Swarm.ok(m) and m.type == "grant" and m.idx ~= nil then
-            print("[zone] Server granted idx " .. m.idx)
-            return m.idx
+            print("[zone] Server granted idx " .. m.idx ..
+                  (m.level and (" (resume Y=" .. m.level .. ")") or ""))
+            return m.idx, m.level
         end
     end
     return nil
@@ -403,6 +406,11 @@ local function statusLoop()
             slot  = state.slot,
             site  = state.site,    -- for the server's zone-claim renewal
             zoneIdx = state.slot,
+            -- current mining layer (absolute Y). The server stores the
+            -- DEEPEST per zone (persisted), so a wiped/replaced turtle
+            -- can resume the layer. Absolute Y (not depth) survives
+            -- terrain differences in topY between turtles.
+            level = (state.topY or MINING_Y) - (state.depth or 0),
             pos   = deadPos(),     -- GPS overrides this above ground
 
             ver   = VERSION,
@@ -958,7 +966,7 @@ local function relocateToNewZone()
 
     -- atomic: mark this zone done AND get the next free one
     local oldSlot = state.slot
-    local idx = acquireZone(state.slot)
+    local idx, level = acquireZone(state.slot)
     if idx == nil then
         -- no server: best-effort. negotiateSlot ranks among peers and
         -- our own just-vacated slot reads as free, so it can hand back
@@ -976,6 +984,22 @@ local function relocateToNewZone()
     state.room = { px = 0, pz = 0, facing = Nav.facing }
     state.room.step = 0
     Utils.saveState(state)
+
+    -- A recycled zone (freed claim, partially mined before) carries a
+    -- resume layer: drop the open column to it (lava-safe, bounded).
+    if level and (state.topY or MINING_Y) - state.depth > level then
+        print("[relocate] Zone had progress - dropping to Y=" .. level)
+        while not stopFlag
+              and (state.topY or MINING_Y) - state.depth > level
+              and (state.topY or MINING_Y) - state.depth > MIN_Y do
+            Utils.down(state)
+            state.depth = state.depth + 1
+            Utils.saveState(state)
+        end
+        state.room.px, state.room.pz, state.room.step = 0, 0, 0
+        faceDir(0)
+        Utils.saveState(state)
+    end
     return true
 end
 
@@ -1116,8 +1140,14 @@ local function mission()
         print("[init] Home saved: " .. home.x .. "," .. home.y .. "," .. home.z)
     end
     if not state.slot then
-        -- fresh: ask the server, else decentralized fallback
-        setZone(acquireZone() or negotiateSlot())
+        -- fresh: ask the server, else decentralized fallback. The grant
+        -- may carry a resume layer (this zone was mined deeper before a
+        -- wipe/replace) - stash it; the descend phase drops to it.
+        local idx, level = acquireZone()
+        if idx == nil then idx = negotiateSlot() end
+        setZone(idx)
+        state.resumeLevel = level
+        Utils.saveState(state)
     end
     -- (resume keeps its saved slot; the server resumes the same claim
     -- if still held. A >30min crash can free it and let another miner
@@ -1224,6 +1254,32 @@ local function mission()
         faceDir(0)
         Utils.saveState(state)
     end
+
+    -- SERVER-AUTHORITATIVE LAYER RESUME: a freshly-started miner (local
+    -- state was wiped/replaced) took a zone the server knows was mined
+    -- deeper. Drop straight down the (already-open) center column to that
+    -- layer instead of re-walking every done level via the empty-skip.
+    -- Utils.down is lava-safe (seals lava below before moving). Bounded
+    -- by MIN_Y. Persisted each block so a crash mid-drop continues here.
+    if state.phase == "mining" and state.resumeLevel
+       and (state.topY or MINING_Y) - state.depth > state.resumeLevel then
+        currentPhase = "resume"
+        print("[resume] Server layer Y=" .. state.resumeLevel ..
+              " - dropping the center column...")
+        ensureOriented()
+        walkTo(state.center.x, state.center.z, "xz")
+        while not stopFlag
+              and (state.topY or MINING_Y) - state.depth > state.resumeLevel
+              and (state.topY or MINING_Y) - state.depth > MIN_Y do
+            Utils.down(state)
+            state.depth = state.depth + 1
+            Utils.saveState(state)
+        end
+        state.room.px, state.room.pz, state.room.step = 0, 0, 0
+        faceDir(0)
+    end
+    state.resumeLevel = nil  -- reached (or no server layer): mine normally
+    Utils.saveState(state)
 
     while state.phase == "mining" do
         local result = mineRoom()  -- always ends at the zone center

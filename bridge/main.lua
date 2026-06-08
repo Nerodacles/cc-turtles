@@ -87,8 +87,8 @@ local function pumpWebsocket(ws)
                 os.reboot()
             end
         elseif type(m) == "table" and m.type == "zone_grant" and m.miner ~= nil then
-            -- keyed so the miner trusts the grant
-            Swarm.to(m.miner, { type = "grant", idx = m.idx }, "swarm_zone")
+            -- keyed so the miner trusts the grant; level = resume layer
+            Swarm.to(m.miner, { type = "grant", idx = m.idx, level = m.level }, "swarm_zone")
         end
     end
 end

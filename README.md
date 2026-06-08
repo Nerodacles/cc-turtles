@@ -71,7 +71,7 @@ Limits to know: the key travels in plaintext (a determined player sniffing raw m
 
 | Protocol | Purpose |
 |---|---|
-| `swarm_status` | Heartbeat every 5s from every turtle (role, phase, fuel, inv%, GPS pos, zone) |
+| `swarm_status` | Heartbeat every 5s from every turtle (role, phase, fuel, inv%, GPS/dead-reckoned pos, zone, mining layer Y) |
 | `swarm_cmd` | Pocket commands: `mine_at` (entry point) / `start` / `pause` / `resume` / `stop` / `update` |
 | `swarm_courier` | Pickup negotiation: `request` → `offer` → `assign` → `arrived` → `done` |
 | `swarm_fuel` | Fuel delivery: `request` → `offer` → `assign` → `arrived` → `delivered` |
@@ -175,6 +175,8 @@ Every single move (flights, shaft, tunnel, rooms, vein chases) is journaled to `
 ### Crash recovery
 
 Every step persists to `state.json` (phase, zone slot, shaft depth, room offset, mined counts). On reboot `startup.lua` resumes automatically — re-orienting via GPS, and skipping the lane lock when already inside the column (a resumed turtle waiting for a flow it physically blocks would deadlock). After a successful mission the state file is deleted, so the next boot waits for `start` again.
+
+**Server-authoritative layer resume** — `state.json` covers normal crashes, but a turtle that's broken and re-placed (or whose disk is wiped) loses it. So the web server also persists, per zone, the **deepest layer (absolute Y) ever mined** there, keyed by zone index in `zones.json` on the PVC (`prog{idx: Y}`). Every heartbeat reports the miner's current `level`; the server keeps the minimum. When a miner is granted a zone the grant carries that layer, and a fresh miner drops straight down the (already-open) center column to it before mining — instead of re-walking every done level. The dashboard shows each miner's live `Y` and, in the detail panel, the stored **resume Y**.
 
 Known gap: a crash in the middle of a vein chase or a service trip (short windows) can desync position — the trail backtrack recovers the turtle to home.
 
