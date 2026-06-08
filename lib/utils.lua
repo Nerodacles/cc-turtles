@@ -84,12 +84,27 @@ local FILLER = {
     ["minecraft:netherrack"]         = true,
 }
 
+-- Filler stacks to keep aboard for lava sealing. Deep mining (Y<0) is
+-- lava-heavy and each sealed wall consumes a block permanently, so we
+-- hold several stacks of throwaway deepslate/cobble instead of one.
+Utils.FILLER_RESERVE = 4
+
 function Utils.findFillerSlot()
     for s = 1, 16 do
         local d = turtle.getItemDetail(s)
         if d and FILLER[d.name] then return s end
     end
     return nil
+end
+
+-- How many filler stacks (lava-seal reserve) we currently hold
+function Utils.fillerStacks()
+    local n = 0
+    for s = 1, 16 do
+        local d = turtle.getItemDetail(s)
+        if d and FILLER[d.name] then n = n + 1 end
+    end
+    return n
 end
 
 -- Seal a lava space with a filler block (placeFn: turtle.place /
@@ -141,7 +156,7 @@ end
 -- net zero, so counters stay valid and the trail stays exact (U+D),
 -- and no turns, so room facing is untouched. CSMA-style backoff.
 -- ============================================================
-local function jiggleLeg(mv, det, insp, dg, rec, back, recBack)
+local function jiggleLeg(mv, det, insp, dg, rec, back, recBack, backAtk, backDig)
     if det() then
         local ok, b = insp()
         if not ok or Utils.isProtected(b.name) or Utils.isLava(b.name) then
@@ -153,20 +168,43 @@ local function jiggleLeg(mv, det, insp, dg, rec, back, recBack)
     if not mv() then return false end
     Trail.record(rec)
     os.sleep(2 + math.random() * 6)  -- random: breaks symmetric standoffs
-    while not back() do os.sleep(0.5) end  -- reclaim our cell
+    -- Reclaim OUR cell (the only position-consistent outcome). It may
+    -- be briefly taken by a passing turtle: keep trying, but handle
+    -- mobs and an empty tank so this is never a silent dead hang.
+    while not back() do
+        backAtk()                -- mob in our cell? swing
+        Fuel.rescueIfStranded()  -- empty tank? call a fueler
+        backDig()                -- gravel fell in? clear it (guarded)
+        os.sleep(0.5)
+    end
     Trail.record(recBack)
     return true
 end
 
 function Utils.jiggle(label)
     print("[jam] Turtle gridlock (" .. label .. ") - making way...")
-    -- hop in a vertical direction that is not the blocked one
+    -- hop in a vertical direction that is not the blocked one; the
+    -- reclaim uses the OPPOSITE side's attack/dig (guarded) helpers
+    local function digDownGuarded()
+        local ok, b = turtle.inspectDown()
+        if ok and not Utils.isProtected(b.name) and not Utils.isLava(b.name) then
+            turtle.digDown()
+        end
+    end
+    local function digUpGuarded()
+        local ok, b = turtle.inspectUp()
+        if ok and not Utils.isProtected(b.name) and not Utils.isLava(b.name) then
+            turtle.digUp()
+        end
+    end
     if label ~= "above" and jiggleLeg(turtle.up, turtle.detectUp,
-            turtle.inspectUp, turtle.digUp, "U", turtle.down, "D") then
+            turtle.inspectUp, turtle.digUp, "U", turtle.down, "D",
+            turtle.attackDown, digDownGuarded) then
         return
     end
     if label ~= "below" and jiggleLeg(turtle.down, turtle.detectDown,
-            turtle.inspectDown, turtle.digDown, "D", turtle.up, "U") then
+            turtle.inspectDown, turtle.digDown, "D", turtle.up, "U",
+            turtle.attackUp, digUpGuarded) then
         return
     end
     -- boxed in: a random pause still desynchronizes retry rhythms
@@ -180,52 +218,77 @@ end
 -- ============================================================
 local JAM_AFTER = 100  -- blocked-by-turtle ticks (~45s) before jiggling
 
-local function digMove(move, detect, inspect, dig, attack, state, label)
+local function digMove(move, detect, inspect, dig, attack, place, state, label)
     local tries = 0
-    while not move() do
-        Fuel.rescueIfStranded()  -- empty tank? call a fueler from here
-        if detect() then
-            local ok, b = inspect()
-            if ok and Utils.isProtected(b.name) then
-                tries = tries + 1
-                if tries % 50 == 1 then
-                    print("[guard] Protected block " .. label .. " (" ..
-                          b.name .. ") - will NOT dig, waiting...")
+    while true do
+        -- LAVA PRE-CHECK: detect() is FALSE on fluids, so a naive
+        -- move() walks straight INTO lava and the turtle dies. Seal
+        -- the destination first (lava -> filler, now a solid block the
+        -- normal dig path clears safely). This is the universal guard:
+        -- the overtake/bypass/recenter raw moves rely on it.
+        local blocked = false
+        if not detect() then
+            local fok, fb = inspect()
+            if fok and Utils.isLava(fb.name) then
+                if not Utils.seal(place) then
+                    if tries % 50 == 0 then
+                        print("[guard] LAVA " .. label ..
+                              ", no filler to seal - waiting...")
+                    end
+                    tries = tries + 1
+                    blocked = true  -- do NOT move into lava
                 end
-                -- Sustained block by another TURTLE? break the gridlock
-                if b.name:find("computercraft") and tries % JAM_AFTER == 0 then
-                    Utils.jiggle(label)
-                end
-                os.sleep(0.4)
-            else
-                if ok then Utils.record(state, b.name) end
-                dig()
-                os.sleep(0.2)
             end
-        else
-            -- No block but can't move: an entity is in the way.
-            -- Swing at it (works with any tool; harmless without one).
-            attack()
-            os.sleep(0.4)
+        end
+
+        if not blocked and move() then return end
+        if blocked then os.sleep(0.5) end
+
+        Fuel.rescueIfStranded()  -- empty tank? call a fueler from here
+        if not blocked then
+            if detect() then
+                local ok, b = inspect()
+                if ok and Utils.isProtected(b.name) then
+                    tries = tries + 1
+                    if tries % 50 == 1 then
+                        print("[guard] Protected block " .. label .. " (" ..
+                              b.name .. ") - will NOT dig, waiting...")
+                    end
+                    -- Sustained block by another TURTLE? break the gridlock
+                    if b.name:find("computercraft") and tries % JAM_AFTER == 0 then
+                        Utils.jiggle(label)
+                    end
+                    os.sleep(0.4)
+                else
+                    if ok then Utils.record(state, b.name) end
+                    dig()
+                    os.sleep(0.2)
+                end
+            else
+                -- No block but can't move: an entity is in the way.
+                -- Swing at it (works with any tool; harmless without one).
+                attack()
+                os.sleep(0.4)
+            end
         end
     end
 end
 
 function Utils.forward(state)
     digMove(turtle.forward, turtle.detect, turtle.inspect,
-            turtle.dig, turtle.attack, state, "ahead")
+            turtle.dig, turtle.attack, turtle.place, state, "ahead")
     if Nav.facing then Trail.record(tostring(Nav.facing)) end
 end
 
 function Utils.down(state)
     digMove(turtle.down, turtle.detectDown, turtle.inspectDown,
-            turtle.digDown, turtle.attackDown, state, "below")
+            turtle.digDown, turtle.attackDown, turtle.placeDown, state, "below")
     Trail.record("D")
 end
 
 function Utils.up(state)
     digMove(turtle.up, turtle.detectUp, turtle.inspectUp,
-            turtle.digUp, turtle.attackUp, state, "above")
+            turtle.digUp, turtle.attackUp, turtle.placeUp, state, "above")
     Trail.record("U")
 end
 
@@ -275,18 +338,18 @@ local JUNK = {
     ["minecraft:netherrack"]        = true,
 }
 
--- Toss junk overboard (default: down), keeping ONE filler stack for
--- lava seals. Returns the number of slots freed.
+-- Toss junk overboard (default: down), keeping up to FILLER_RESERVE
+-- filler stacks for lava seals. Returns the number of slots freed.
 function Utils.purgeJunk(dropFn)
     dropFn = dropFn or turtle.dropDown
     local prev = turtle.getSelectedSlot()
-    local fillerKept = false
+    local fillerKept = 0
     local freed = 0
     for s = 1, 16 do
         local d = turtle.getItemDetail(s)
         if d and JUNK[d.name] then
-            if FILLER[d.name] and not fillerKept then
-                fillerKept = true  -- lava-sealing reserve
+            if FILLER[d.name] and fillerKept < Utils.FILLER_RESERVE then
+                fillerKept = fillerKept + 1  -- lava-sealing reserve
             else
                 turtle.select(s)
                 dropFn()
@@ -301,20 +364,36 @@ function Utils.purgeJunk(dropFn)
     return freed
 end
 
--- Drop only the VALUABLE cargo: burnables (fuel reserve) and one
--- filler stack (lava seals) stay aboard
-function Utils.dropCargo(dropFn)
+-- Bank ALL burnables into the fuel TANK (coal becomes stored energy,
+-- freeing inventory slots). Stops at the tank cap; surplus coal that
+-- won't fit stays in the inventory and is then treated as cargo - this
+-- is what prevents the tank-full courier-loop (coal kept forever ->
+-- slots never free -> endless courier calls that take nothing).
+function Utils.bankFuel()
     local prev = turtle.getSelectedSlot()
-    local fillerKept = false
+    for s = 1, 16 do
+        if turtle.getItemCount(s) > 0 then
+            turtle.select(s)
+            if turtle.refuel(0) then turtle.refuel() end  -- burn the whole stack
+        end
+    end
+    turtle.select(prev)
+end
+
+-- Drop everything EXCEPT one filler stack (lava seals). Coal is banked
+-- to the tank first; only tank-full surplus coal remains and gets
+-- delivered as cargo.
+function Utils.dropCargo(dropFn)
+    Utils.bankFuel()
+    local prev = turtle.getSelectedSlot()
+    local fillerKept = 0
     for s = 1, 16 do
         local d = turtle.getItemDetail(s)
         if d then
-            turtle.select(s)
-            if turtle.refuel(0) then
-                -- burnable: our fuel reserve, stays
-            elseif FILLER[d.name] and not fillerKept then
-                fillerKept = true  -- lava-sealing reserve, stays
+            if FILLER[d.name] and fillerKept < Utils.FILLER_RESERVE then
+                fillerKept = fillerKept + 1  -- lava-sealing reserve, stays
             else
+                turtle.select(s)
                 dropFn()
             end
         end
@@ -322,19 +401,18 @@ function Utils.dropCargo(dropFn)
     turtle.select(prev)
 end
 
--- Anything aboard that is neither fuel reserve nor the filler stack?
+-- Anything aboard worth delivering? Banks coal first, then anything
+-- beyond the filler reserve is cargo.
 function Utils.hasCargo()
+    Utils.bankFuel()
     local prev = turtle.getSelectedSlot()
-    local fillerKept = false
+    local fillerKept = 0
     local found = false
     for s = 1, 16 do
         local d = turtle.getItemDetail(s)
         if d then
-            turtle.select(s)
-            if turtle.refuel(0) then
-                -- reserve
-            elseif FILLER[d.name] and not fillerKept then
-                fillerKept = true
+            if FILLER[d.name] and fillerKept < Utils.FILLER_RESERVE then
+                fillerKept = fillerKept + 1
             else
                 found = true
                 break

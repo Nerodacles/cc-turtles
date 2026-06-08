@@ -35,33 +35,40 @@ function Trail.backtrack(Nav)
     f.close()
     if #moves == 0 then return false end
 
-    -- Guarded dig: clear gravel etc but NEVER another turtle/computer
-    -- (trail is standalone; minimal inline check to avoid require cycles)
+    -- Guarded dig: clear gravel etc but NEVER another turtle/computer.
+    -- (trail is standalone; minimal inline checks to avoid require cycles)
     local function safeDig(inspect, dig)
         local ok, b = inspect()
         if ok and not b.name:find("computercraft") then dig() end
     end
-
+    -- Each reverse move below also waits out lava (detect() is false
+    -- on fluids, so a naive move would walk in and die).
     print("[trail] Backtracking " .. #moves .. " moves...")
     for i = #moves, 1, -1 do
         local c = moves:sub(i, i)
         if c == "U" then        -- went up -> go down
-            while not turtle.down() do
-                safeDig(turtle.inspectDown, turtle.digDown)
-                os.sleep(0.2)
+            while true do
+                local ok, b = turtle.inspectDown()
+                if ok and b.name == "minecraft:lava" then os.sleep(0.5)
+                elseif turtle.down() then break
+                else safeDig(turtle.inspectDown, turtle.digDown); os.sleep(0.2) end
             end
         elseif c == "D" then    -- went down -> go up
-            while not turtle.up() do
-                safeDig(turtle.inspectUp, turtle.digUp)
-                os.sleep(0.2)
+            while true do
+                local ok, b = turtle.inspectUp()
+                if ok and b.name == "minecraft:lava" then os.sleep(0.5)
+                elseif turtle.up() then break
+                else safeDig(turtle.inspectUp, turtle.digUp); os.sleep(0.2) end
             end
         else
             local d = tonumber(c)
             if d then           -- moved towards d -> move towards opposite
                 Nav.face((d + 2) % 4)
-                while not turtle.forward() do
-                    safeDig(turtle.inspect, turtle.dig)
-                    os.sleep(0.2)
+                while true do
+                    local ok, b = turtle.inspect()
+                    if ok and b.name == "minecraft:lava" then os.sleep(0.5)
+                    elseif turtle.forward() then break
+                    else safeDig(turtle.inspect, turtle.dig); os.sleep(0.2) end
                 end
             end
         end

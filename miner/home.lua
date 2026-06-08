@@ -22,6 +22,9 @@ end
 Utils.openModem()        -- the 0-fuel rescue broadcasts via rednet
 Fuel.ensure(100, false)  -- cannot fly on an empty tank
 
+-- Miner carries filler, so flights can seal+cross lava
+Nav.sealFn = Utils.seal
+
 -- Guarded digs for the flight (same rules as missions: never
 -- protected blocks, never lava, never other turtles)
 Nav.digFns = {

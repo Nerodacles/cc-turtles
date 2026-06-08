@@ -152,12 +152,13 @@ Known gap: a crash in the middle of a vein chase or a service trip (short window
 | Variable | Default | Description |
 |---|---|---|
 | `MINING_Y` | 30 | Y of the first room (surface Y comes from the dig site) |
-| `MIN_Y` | 8 | Deepest room level. Lava guards make deeper levels survivable, but Y −55..−63 is solid lava aquifer (diamonds peak near Y=−59) |
+| `MIN_Y` | −50 | Deepest room level — top of the diamond band, still above the always-lava aquifer (Y −55..−63). Lava guards seal everything on the way down |
 | `LEVEL_STEP` | 3 | Blocks between stacked rooms (3 = contiguous, no floors; set 4 to leave a 1-block floor) |
 | `ROOM_RINGS` | 5 | Room radius → 11×11 |
 | `ZONE_SPREAD` | 16 | Blocks between room centers below the shared shaft |
 | `VEIN_MAX_DEPTH` | 16 | Max vein recursion |
 | `CALL_COURIER_PCT` | 80 | Inventory % that triggers a courier |
+| `Utils.FILLER_RESERVE` | 4 | Filler stacks (deepslate/cobble) kept aboard for lava sealing |
 
 ### Emergency `home` command (on the turtle)
 

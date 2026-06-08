@@ -62,18 +62,24 @@ function Nav.orient()
     end
     local p1 = Nav.locate()
     for _ = 1, 4 do
-        if turtle.detect() and Nav.digFns then Nav.digFns.fwd() end
-        if turtle.forward() then
-            local p2 = Nav.locate()
-            local dx, dz = p2.x - p1.x, p2.z - p1.z
-            local dir = (dx == 1 and 1) or (dx == -1 and 3)
-                     or (dz == 1 and 0) or (dz == -1 and 2)
-            if dir then Trail.record(tostring(dir)) end
-            while not turtle.back() do os.sleep(0.2) end
-            if dir then
-                Trail.record(tostring((dir + 2) % 4))  -- net zero on replay
-                Nav.facing = dir
-                return dir
+        -- Skip a direction that opens into lava (detect() is false on
+        -- fluids, so a naive forward would walk into it and die)
+        local lok, lb = turtle.inspect()
+        local lava = lok and lb.name == "minecraft:lava"
+        if not lava then
+            if turtle.detect() and Nav.digFns then Nav.digFns.fwd() end
+            if turtle.forward() then
+                local p2 = Nav.locate()
+                local dx, dz = p2.x - p1.x, p2.z - p1.z
+                local dir = (dx == 1 and 1) or (dx == -1 and 3)
+                         or (dz == 1 and 0) or (dz == -1 and 2)
+                if dir then Trail.record(tostring(dir)) end
+                while not turtle.back() do os.sleep(0.2) end
+                if dir then
+                    Trail.record(tostring((dir + 2) % 4))  -- net zero on replay
+                    Nav.facing = dir
+                    return dir
+                end
             end
         end
         turtle.turnRight()
@@ -85,7 +91,21 @@ end
 -- NO-DIG MOVEMENT: retry until the path clears (mob walks away,
 -- gravel settles...). Warns periodically while blocked.
 -- ============================================================
-local ATTACK = { fwd = turtle.attack, up = turtle.attackUp, down = turtle.attackDown }
+local ATTACK  = { fwd = turtle.attack,   up = turtle.attackUp,   down = turtle.attackDown }
+local INSPECT = { fwd = turtle.inspect,  up = turtle.inspectUp,  down = turtle.inspectDown }
+local PLACE   = { fwd = turtle.place,    up = turtle.placeUp,    down = turtle.placeDown }
+
+-- Miners set Nav.sealFn = Utils.seal so flights can convert lava to a
+-- filler block and cross it. Service turtles (no filler) leave it nil
+-- and wait/abort at lava instead.
+Nav.sealFn = nil
+
+-- Is the cell in this direction lava? (service turtles can't seal it,
+-- so they must never move into it; detect() is false on fluids)
+local function lavaAt(digKey)
+    local ok, b = INSPECT[digKey]()
+    return ok and b.name == "minecraft:lava"
+end
 
 -- One iteration of being stuck: swing at entities, rescue an empty
 -- tank, warn periodically, give up if configured. Shared by persist
@@ -105,10 +125,30 @@ end
 
 local function persist(move, digKey, label)
     local tries = 0
-    while not move() do
-        if Nav.digFns and Nav.digFns[digKey] then Nav.digFns[digKey]() end
-        tries = tries + 1
-        stuckTick(digKey, tries, label)
+    while true do
+        -- Lava ahead: miners (sealFn set) convert it to filler and
+        -- cross; service turtles (no filler) wait it out or give up so
+        -- the trip aborts instead of the turtle dying in the lava.
+        if lavaAt(digKey) then
+            if Nav.sealFn and Nav.sealFn(PLACE[digKey]) then
+                -- sealed -> now a solid filler block; the dig path
+                -- below clears it on the next iteration
+            else
+                tries = tries + 1
+                if tries % 25 == 0 then
+                    print("[nav] LAVA " .. label .. " - cannot enter")
+                end
+                if Nav.giveUp and tries > 150 then
+                    error("nav: lava (" .. label .. ")", 0)
+                end
+                os.sleep(0.4)
+            end
+        else
+            if Nav.digFns and Nav.digFns[digKey] then Nav.digFns[digKey]() end
+            if move() then return end
+            tries = tries + 1
+            stuckTick(digKey, tries, label)
+        end
     end
 end
 
@@ -133,8 +173,10 @@ end
 local function hopStep()
     local tries = 0
     while not turtle.forward() do
-        if turtle.detect() then
-            Nav.up()  -- obstacle: go over it (digs only via digFns if climbing is blocked)
+        if turtle.detect() or lavaAt("fwd") then
+            -- solid obstacle OR lava ahead (detect() is false on lava):
+            -- hop OVER it rather than digging/entering
+            Nav.up()
         else
             tries = tries + 1
             stuckTick("fwd", tries, "hop")

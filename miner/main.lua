@@ -16,7 +16,8 @@ local Lane  = require("lane")
 -- CONFIG
 -- ============================================================
 local MINING_Y         = 30   -- Y of the FIRST room (turtle mid-layer)
-local MIN_Y            = 8    -- no rooms below this (lava lakes gen Y 0-50!)
+local MIN_Y            = -50  -- deepest room (top of the diamond band;
+                              -- still above the always-lava aquifer -55..-63)
 local LEVEL_STEP       = 3    -- room height (3), contiguous: stacked
                               -- levels leave NO floor between them
 local ROOM_RINGS       = 5    -- room is (2*RINGS+1)^2 -> 11x11
@@ -119,6 +120,10 @@ end
 local function ensureOriented()
     if Nav.facing == nil then orientPatiently() end
 end
+
+-- Miners carry filler, so Nav flights can seal+cross lava (service
+-- turtles leave this nil and wait/abort at lava instead)
+Nav.sealFn = Utils.seal
 
 -- Guarded dig fns so Nav can dig during flights (never protected/lava)
 Nav.digFns = {
@@ -438,13 +443,20 @@ local function requestCourier()
         readyType = "arrived",
         abortFn   = function() return stopFlag end,
         onReady   = function(id)
-            -- Junk never reaches the chests: toss it here, then hand
-            -- over the loot. Burnables (fuel reserve) and one filler
-            -- stack (lava seals) stay aboard; the hoard gets banked
-            -- into the tank (holds fuel without occupying slots)
+            -- Confirm the courier is actually hovering above before we
+            -- dropUp: a courier that crashed between 'arrived' and now
+            -- is gone, and dropping into empty air loses the loot. No
+            -- turtle above -> keep everything, retry the courier later.
+            local up, ub = turtle.inspectUp()
+            if not (up and ub.name:find("computercraft")) then
+                print("[courier] Courier left before transfer - keeping cargo")
+                return
+            end
+            -- Junk never reaches the chests; coal banks to the tank
+            -- (dropCargo does it). Only ore + tank-full surplus coal
+            -- go to the courier; one filler stack stays for lava seals.
             Utils.purgeJunk()
             Utils.dropCargo(turtle.dropUp)
-            Fuel.refuel(2 ^ 30)
             Swarm.to(id, { type = "done" }, PROTO_COURIER)
             print("[courier] Transfer complete (inv " .. Utils.invPercent() ..
                   "% | fuel " .. turtle.getFuelLevel() .. ")")
@@ -479,7 +491,6 @@ local function unloadToCourier(maxTries)
             os.sleep(15 + math.random(0, 10))
         end
     end
-    Fuel.refuel(2 ^ 30)  -- bank the fuel hoard into the tank
     if Utils.hasCargo() then
         print("[unload] Cargo still aboard")
     end
@@ -499,7 +510,8 @@ local function cargoCheck()
         end
     end
     if Utils.invPercent() >= CALL_COURIER_PCT then
-        Utils.purgeJunk()  -- cobble first: may avoid the courier call
+        Utils.bankFuel()   -- bank coal to the tank: frees slots
+        Utils.purgeJunk()  -- toss cobble: may avoid the courier call
     end
     if Utils.invPercent() >= CALL_COURIER_PCT then
         if os.clock() - lastCourierTry >= COURIER_COOLDOWN then
@@ -520,9 +532,11 @@ local function roomAbortReason()
     if updateFlag then return "update" end
     topUpFuel()
     if fuelLow() then return "fuel" end
-    -- Junk first: tossing cobble often drops us back under the
-    -- threshold and saves the whole courier round trip
+    -- Bank coal to the tank and toss junk before deciding: both free
+    -- slots and often drop us back under the threshold, saving the
+    -- whole courier round trip
     if Utils.invPercent() >= CALL_COURIER_PCT then
+        Utils.bankFuel()
         Utils.purgeJunk()
     end
     if Utils.invFull() then return "full" end
@@ -833,13 +847,16 @@ local function descendLevel()
     state.room.step = 0  -- fresh level: no progress to catch up
     for _ = 1, LEVEL_STEP do
         local dOk, dB = turtle.inspectDown()
-        if dOk and Utils.isLava(dB.name) then
-            print("[guard] LAVA below - sealed, no deeper levels")
-            Utils.seal(turtle.placeDown)
-            return false
-        end
+        -- A protected block (dungeon chest, spawner...) stops us; lava
+        -- does NOT - Utils.down seals it with filler and drops through,
+        -- so we keep descending toward MIN_Y past lava pockets
         if dOk and Utils.isProtected(dB.name) then
             print("[guard] Protected block below - cannot go deeper")
+            return false
+        end
+        -- No filler left to seal the lava below? don't drop into it
+        if dOk and Utils.isLava(dB.name) and Utils.fillerStacks() == 0 then
+            print("[guard] LAVA below, no filler - stopping descent")
             return false
         end
         Utils.down(state)
@@ -853,7 +870,8 @@ end
 -- SERVICE TRIP: rooms have no open column above, so couriers and
 -- fuelers meet us at OUR SHAFT. Climb the center column (open from
 -- stacked levels), retrace the tunnel, run fn, come back.
--- NOTE: a crash mid-trip desyncs position (short window, accepted).
+-- A crash mid-trip is recovered by the mining-resume re-center
+-- (mission() re-establishes the zone center via GPS before resuming).
 -- ============================================================
 local function serviceTrip(fn)
     currentPhase = "to_shaft"
@@ -946,6 +964,7 @@ end
 -- ============================================================
 local function mission()
     local saved = Utils.loadState()
+    local bootPhase = saved and saved.phase  -- phase we BOOTED in
     if saved then
         state = saved
         print("[resume] phase=" .. state.phase .. " depth=" .. (state.depth or 0))
@@ -1064,6 +1083,27 @@ local function mission()
         else
             state.phase = "return"
         end
+        Utils.saveState(state)
+    end
+
+    -- RESUME into mining: an ungraceful crash (chunk unload while the
+    -- player wandered off, server kill) can leave us mid-serpentine or
+    -- mid-service-trip - NOT at the center mineRoom assumes. Re-establish
+    -- the exact center via GPS before the dead-reckoning room logic runs.
+    -- (Graceful update reboots already happen at center -> this no-ops.)
+    if bootPhase == "mining" then
+        print("[resume] Re-centering in the zone...")
+        ensureOriented()
+        walkTo(state.center.x, state.center.z, "xz")  -- center column, current Y
+        local _, cy = gps.locate(2)
+        local roomY = (state.topY or MINING_Y) - state.depth
+        if cy then
+            for _ = 1, cy - roomY do Utils.down(state) end  -- down the open column
+            for _ = 1, roomY - cy do Utils.up(state) end    -- defensive
+        end
+        state.room.px, state.room.pz = 0, 0
+        state.room.facing = Nav.facing
+        faceDir(0)
         Utils.saveState(state)
     end
 

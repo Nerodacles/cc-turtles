@@ -46,7 +46,10 @@ function Service.init(opts)
         if cur.x ~= Service.home.x or cur.y ~= Service.home.y
            or cur.z ~= Service.home.z then
             print("[init] Not at home - recovering...")
-            if not Trail.backtrack(Nav) then Nav.goTo(Service.home) end
+            -- pcall: giveUp is on, so a blocked goTo would otherwise
+            -- crash the boot. The first delivery's return self-corrects
+            -- to the saved home if this didn't fully land.
+            if not Trail.backtrack(Nav) then pcall(Nav.goTo, Service.home) end
             if opts.onArriveHome then opts.onArriveHome() end
         end
     end

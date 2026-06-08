@@ -34,6 +34,12 @@ function Lane.listener()
             elseif msg.type == "waiting" then
                 waiting[msg.lane .. "|" .. id] =
                     { t = os.clock(), dir = msg.dir, waited = msg.waited or 0 }
+            elseif msg.type == "left" then
+                -- Explicit release: free the lane NOW instead of
+                -- waiting out the 12s TTL (matters at every direction
+                -- reversal in the shared shaft)
+                using[msg.lane .. "|" .. id]   = nil
+                waiting[msg.lane .. "|" .. id] = nil
             end
         end
     end
@@ -131,7 +137,11 @@ function Lane.enter(x, z, dir, abortFn)
 end
 
 function Lane.exit()
-    current = nil
+    if current then
+        -- Tell everyone we left so the lane frees immediately
+        Swarm.bcast({ type = "left", lane = current.lane }, Lane.PROTO)
+        current = nil
+    end
 end
 
 return Lane
