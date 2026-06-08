@@ -178,8 +178,32 @@ document.getElementById("dRun").addEventListener("click", runExec);
 document.getElementById("dExec").addEventListener("keydown", (e) => { if (e.key === "Enter") runExec(); });
 
 // ---- commands -------------------------------------------------------
+// 'update' disables its button until every live turtle reports the
+// latest version (or a 2-min fallback window elapses).
+let updatingUntil = 0;
+function allAtLatest() {
+  const now = Date.now();
+  let any = false, ok = true;
+  for (const t of turtles.values()) {
+    if (now - t.last > STALE_MS || t.data.ver == null) continue;
+    any = true;
+    if (t.data.ver !== meta.latest) ok = false;
+  }
+  return any && ok;
+}
+function refreshUpdateBtn() {
+  const btn = document.querySelector('.cmds button[data-cmd="update"]');
+  if (!btn) return;
+  const busy = Date.now() < updatingUntil && !allAtLatest();
+  btn.disabled = busy;
+  btn.textContent = busy ? "⟳ updating…" : "⟳ update";
+  if (!busy) updatingUntil = 0;
+}
 document.querySelectorAll(".cmds button[data-cmd]").forEach((b) =>
-  b.addEventListener("click", () => sendCmd({ cmd: b.dataset.cmd }))
+  b.addEventListener("click", () => {
+    sendCmd({ cmd: b.dataset.cmd });
+    if (b.dataset.cmd === "update") { updatingUntil = Date.now() + 120000; refreshUpdateBtn(); }
+  })
 );
 const dlg = document.getElementById("entryDlg");
 document.getElementById("entryBtn").addEventListener("click", () => dlg.showModal());
@@ -338,7 +362,7 @@ function renderLegend() {
     `<div class="row tot"><span class="n">found</span><span class="c">${ores.length}</span></div>`;
 }
 
-function render() { renderList(); renderMap(); renderLegend(); }
+function render() { renderList(); renderMap(); renderLegend(); refreshUpdateBtn(); }
 
 fit(); lockUI(); connect();
 setInterval(render, 1000); // refresh stale fades + ages
