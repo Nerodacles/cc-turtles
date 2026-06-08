@@ -18,13 +18,14 @@ spec:
       containers:
         - name: dashboard
           image: node:22-alpine
-          workingDir: /app
           command: ["/bin/sh", "-c"]
           args:
+            # run from inside the clone so the server can read
+            # ../lib/version.lua (the single global version file)
             - >
               apk add --no-cache git &&
-              git clone --depth 1 https://github.com/Nerodacles/cc-turtles /src &&
-              cp -r /src/web/* /app/ &&
+              git clone --depth 1 https://github.com/Nerodacles/cc-turtles /app/repo &&
+              cd /app/repo/web &&
               npm install --omit=dev &&
               node server.js
           env:
