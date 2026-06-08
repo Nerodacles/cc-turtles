@@ -20,6 +20,12 @@ metadata:
   namespace: devops
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): the data PVC is RWO, so the old pod must
+  # release the volume BEFORE the new one mounts it. A rolling surge would
+  # start the new pod first and deadlock on a Multi-Attach error whenever
+  # it lands on a different node than the old pod.
+  strategy:
+    type: Recreate
   selector:
     matchLabels: { app: cc-turtles-dashboard }
   template:
