@@ -752,8 +752,13 @@ local function clearVert(inspect, dig, place)
         return false
     end
     if Utils.isProtected(b.name) then return false end
+    -- dig() is a no-op on fluids (water can't be picked up) and air, so
+    -- only count + record when it ACTUALLY removed a solid block. Without
+    -- this, a flooded level inflates levelMined and the empty-skip never
+    -- fires -> the miner slogs the whole room through water before
+    -- descending, and the stats fill up with "minecraft:water".
+    if not dig() then return false end
     Utils.record(state, b.name)
-    dig()
     levelMined = levelMined + 1
     if Utils.isOre(b.name, b.tags) then noteOre(b.name); return true end
     return false
