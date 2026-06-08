@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Turtle Swarm</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>🐢 Turtle Swarm</h1>
+    <span id="conn" class="pill off">connecting…</span>
+    <span id="count" class="pill">0 turtles</span>
+    <div class="cmds">
+      <button data-cmd="start">▶ start</button>
+      <button data-cmd="pause">⏸ pause</button>
+      <button data-cmd="resume">⏵ resume</button>
+      <button data-cmd="stop" class="warn">⏏ home</button>
+      <button data-cmd="update" class="muted">⟳ update</button>
+      <button id="entryBtn" class="muted">⛏ entry…</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="mapWrap">
+      <canvas id="map"></canvas>
+      <div id="maphint">top-down · X→ · Z↓ · scroll to zoom · drag to pan</div>
+    </section>
+    <section id="list"></section>
+  </main>
+
+  <dialog id="entryDlg">
+    <form method="dialog">
+      <h3>Set entry point</h3>
+      <p>Miners enter (and exit) the mine at this block. Applies next mission.</p>
+      <label>X <input id="ex" type="number" required></label>
+      <label>Y <input id="ey" type="number" required></label>
+      <label>Z <input id="ez" type="number" required></label>
+      <menu>
+        <button value="cancel">cancel</button>
+        <button id="entryOk" value="ok" class="primary">set</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

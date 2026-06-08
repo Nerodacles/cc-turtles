@@ -39,6 +39,11 @@ local MANIFEST = {
         { url = BASE .. "fueler/main.lua",    dest = "/main.lua" },
         { url = BASE .. "fueler/startup.lua", dest = "/startup.lua" },
     },
+    bridge = {
+        { url = BASE .. "lib/swarm.lua",      dest = "/lib/swarm.lua" },
+        { url = BASE .. "bridge/main.lua",    dest = "/main.lua" },
+        { url = BASE .. "bridge/startup.lua", dest = "/startup.lua" },
+    },
 }
 
 -- Cache-busted download (GitHub raw CDN caches ~5 min)

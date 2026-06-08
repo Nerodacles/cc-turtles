@@ -1,0 +1,11 @@
+# Quick local run:  docker compose up --build
+# then open http://localhost:8080  and point the bridge at ws://<host>:8080
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - STALE_MS=20000
+    restart: unless-stopped

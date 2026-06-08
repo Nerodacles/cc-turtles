@@ -1,0 +1,58 @@
+# Dashboard on the cluster. Build/push the image first, e.g.:
+#   docker build -t <registry>/cc-turtles-dashboard:latest web/
+#   docker push  <registry>/cc-turtles-dashboard:latest
+# Then set the image below and apply. Traefik IngressRoute included;
+# adapt host/entryPoints/cert to your setup (or expose via Tailscale).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cc-turtles-dashboard
+  namespace: devops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: cc-turtles-dashboard }
+  template:
+    metadata:
+      labels: { app: cc-turtles-dashboard }
+    spec:
+      containers:
+        - name: dashboard
+          image: REGISTRY/cc-turtles-dashboard:latest
+          ports: [{ containerPort: 8080 }]
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: STALE_MS, value: "20000" }
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 3
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits:   { cpu: 250m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cc-turtles-dashboard
+  namespace: devops
+spec:
+  selector: { app: cc-turtles-dashboard }
+  ports:
+    - { name: http, port: 80, targetPort: 8080 }
+---
+# Traefik IngressRoute (WebSocket works over plain HTTP routing - no
+# special config needed; the upgrade is transparent). Adjust the host.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: cc-turtles-dashboard
+  namespace: devops
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Host(`turtles.example.com`)
+      kind: Rule
+      services:
+        - name: cc-turtles-dashboard
+          port: 80
+  # tls: { certResolver: your-resolver }

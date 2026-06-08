@@ -1,0 +1,13 @@
+{
+  "name": "cc-turtles-dashboard",
+  "version": "1.0.0",
+  "description": "Live WebSocket dashboard for the CC:Tweaked turtle swarm",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

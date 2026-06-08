@@ -26,9 +26,40 @@ mc/
 │   └── main.lua       # Fuel delivery service
 ├── gps/
 │   └── startup.lua    # GPS host — paste once on each of the 4 GPS computers
-└── pocket/
-    └── remote.lua     # Live dashboard + swarm commands
+├── pocket/
+│   └── remote.lua     # In-game dashboard + swarm commands
+├── bridge/
+│   ├── startup.lua    # Rednet<->WebSocket bridge boot
+│   └── main.lua       # Forwards status to the web, commands back
+└── web/
+    ├── server.js      # Node WebSocket + static server
+    ├── public/        # Live browser dashboard (list + top-down map)
+    ├── Dockerfile · docker-compose.yml · k8s.yaml
+    └── package.json
 ```
+
+## Web dashboard (live, WebSockets)
+
+A browser dashboard mirrors the pocket: live turtle cards + a top-down map (positions, mining zones, fuel/inventory), with command buttons (start/pause/resume/home/update, and set-entry by coords).
+
+```
+turtles ──rednet swarm_status──▶ bridge (CC computer) ──WebSocket──▶ Node server ──▶ browsers
+                                       ◀────────────── commands ◀──────────────────
+```
+
+**Server** (Node) — run anywhere with network to the bridge:
+```
+cd web && docker compose up --build      # http://localhost:8080
+```
+or on the cluster: build/push the image and `kubectl apply -f web/k8s.yaml` (Traefik IngressRoute included; WebSockets route transparently).
+
+**Bridge** — one CC computer/turtle with a wireless modem + HTTP, in rednet range of the swarm (next to a GPS repeater is ideal). Tell it the server URL, then install:
+```
+edit bridge.json      ->  { url = "ws://your-server:8080" }
+wget https://raw.githubusercontent.com/Nerodacles/cc-turtles/main/bridge/startup.lua startup.lua
+reboot
+```
+The bridge re-signs web commands with the swarm key, so the dashboard inherits the same auth as the pocket. If you rotated the key (`k`), give the bridge the same `secret.json`.
 
 ## Security (other players)
 
