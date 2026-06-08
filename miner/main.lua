@@ -986,12 +986,15 @@ local function relocateToNewZone()
     Utils.saveState(state)
 
     -- A recycled zone (freed claim, partially mined before) carries a
-    -- resume layer: drop the open column to it (lava-safe, bounded).
+    -- resume layer: drop the open column to it. Stop at lava (we may
+    -- have no filler) and let descendLevel handle it. Bounded by MIN_Y.
     if level and (state.topY or MINING_Y) - state.depth > level then
         print("[relocate] Zone had progress - dropping to Y=" .. level)
         while not stopFlag
               and (state.topY or MINING_Y) - state.depth > level
               and (state.topY or MINING_Y) - state.depth > MIN_Y do
+            local dOk, dB = turtle.inspectDown()
+            if dOk and (Utils.isLava(dB.name) or Utils.isProtected(dB.name)) then break end
             Utils.down(state)
             state.depth = state.depth + 1
             Utils.saveState(state)
@@ -1259,8 +1262,10 @@ local function mission()
     -- state was wiped/replaced) took a zone the server knows was mined
     -- deeper. Drop straight down the (already-open) center column to that
     -- layer instead of re-walking every done level via the empty-skip.
-    -- Utils.down is lava-safe (seals lava below before moving). Bounded
-    -- by MIN_Y. Persisted each block so a crash mid-drop continues here.
+    -- Bounded by MIN_Y. Persisted each block so a crash mid-drop resumes.
+    -- STOP at lava: a fresh turtle has NO filler to seal it (Utils.down
+    -- would hang waiting forever) - just mine from here, descendLevel
+    -- handles lava normally once we've mined some cobble.
     if state.phase == "mining" and state.resumeLevel
        and (state.topY or MINING_Y) - state.depth > state.resumeLevel then
         currentPhase = "resume"
@@ -1271,7 +1276,13 @@ local function mission()
         while not stopFlag
               and (state.topY or MINING_Y) - state.depth > state.resumeLevel
               and (state.topY or MINING_Y) - state.depth > MIN_Y do
-            Utils.down(state)
+            local dOk, dB = turtle.inspectDown()
+            if dOk and (Utils.isLava(dB.name) or Utils.isProtected(dB.name)) then
+                print("[resume] Lava/obstacle in the column - mining from Y=" ..
+                      ((state.topY or MINING_Y) - state.depth))
+                break
+            end
+            Utils.down(state)  -- digs stone, passes air/water; no filler needed
             state.depth = state.depth + 1
             Utils.saveState(state)
         end
