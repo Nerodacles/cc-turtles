@@ -287,10 +287,10 @@ function renderMap() {
   const w = cv.clientWidth, h = cv.clientHeight;
   ctx.clearRect(0, 0, w, h);
 
-  const pts = [...turtles.values()].filter((t) => t.data.pos);
+  const pts = [...turtles.entries()].filter(([, t]) => t.data.pos);
   if (autoCenter && pts.length) {
     let sx = 0, sz = 0;
-    for (const t of pts) { sx += t.data.pos.x; sz += t.data.pos.z; }
+    for (const [, t] of pts) { sx += t.data.pos.x; sz += t.data.pos.z; }
     view.cx = sx / pts.length; view.cz = sz / pts.length; autoCenter = false;
   }
   const cx = view.cx || 0, cz = view.cz || 0;
@@ -315,7 +315,7 @@ function renderMap() {
 
   // turtles
   const now = Date.now();
-  for (const t of pts) {
+  for (const [id, t] of pts) {
     const d = t.data, p = d.pos;
     const px = X(p.x), py = Y(p.z);
     const stale = now - t.last > STALE_MS;
@@ -336,7 +336,7 @@ function renderMap() {
     ctx.fillStyle = "#0b0e13"; ctx.beginPath(); ctx.arc(px, py, 2, 0, 7); ctx.fill();
     ctx.globalAlpha = 1;
     ctx.fillStyle = "#aeb9c7"; ctx.font = "11px ui-monospace, monospace";
-    ctx.fillText(`${d.label || ("#" + 0)} y${p.y}`, px + 8, py + 4);
+    ctx.fillText(`${d.label || ("#" + id)} y${p.y}`, px + 8, py + 4);
   }
   function line(a, b, c2, d2) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d2); ctx.stroke(); }
 }

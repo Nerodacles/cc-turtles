@@ -299,12 +299,12 @@ end
 -- Returns the server-granted idx, or nil if no server/bridge answers.
 local function acquireZone(doneIdx)
     currentPhase = "zoning"
-    rednet.broadcast({ op = doneIdx and "next" or "request",
-                       site = state.site, idx = doneIdx }, "swarm_zone")
+    Swarm.bcast({ op = doneIdx and "next" or "request",
+                  site = state.site, idx = doneIdx }, "swarm_zone")
     local deadline = os.clock() + 4
     while os.clock() < deadline do
         local _, m = rednet.receive("swarm_zone", 0.5)
-        if type(m) == "table" and m.type == "grant" and m.idx ~= nil then
+        if Swarm.ok(m) and m.type == "grant" and m.idx ~= nil then
             print("[zone] Server granted idx " .. m.idx)
             return m.idx
         end

@@ -100,19 +100,10 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
-  // zone registry view / reset (reset frees a site to mine again)
-  if (urlPath === "/api/zones") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify(zones, null, 2));
-  }
-  if (urlPath.startsWith("/api/zones/reset") && req.method === "POST") {
-    const site = decodeURIComponent((req.url.split("?site=")[1] || "").trim());
-    if (site && zones[site]) { delete zones[site]; saveZones(); }
-    else { zones = {}; saveZones(); }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ ok: true }));
-  }
-  // debug: current state (is the bridge forwarding turtle status?)
+  // debug: current state (is the bridge forwarding turtle status?).
+  // NOTE: zone reset is intentionally NOT an HTTP endpoint - it is a
+  // key-gated WebSocket command (reset_zones) so it can't be triggered
+  // unauthenticated.
   if (urlPath === "/api/state") {
     const now = Date.now();
     const out = { latest: LATEST, server: LATEST, bridge: bridgeVer,

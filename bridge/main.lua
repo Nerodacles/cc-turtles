@@ -41,14 +41,13 @@ local function connect()
     return ws
 end
 
--- Forward turtle status heartbeats to the server
+-- Forward turtle status heartbeats to the server (filter to the status
+-- protocol so we don't wake on every lane/site beat). No key required:
+-- it's read-only telemetry; commands and zones still need the key.
 local function pumpRednet(ws)
     while true do
-        local id, msg, proto = rednet.receive()
-        -- Forward any status heartbeat for DISPLAY (no key required -
-        -- it's read-only telemetry; commands still need the key). This
-        -- way the dashboard fills even if the bridge's key differs.
-        if proto == Swarm.PROTO_STATUS and type(msg) == "table" and msg.role then
+        local id, msg = rednet.receive(Swarm.PROTO_STATUS)
+        if type(msg) == "table" and msg.role then
             local ok = pcall(ws.send, textutils.serializeJSON({
                 type = "status", id = id, data = msg,
             }))
@@ -58,11 +57,12 @@ local function pumpRednet(ws)
 end
 
 -- Forward miner zone RPCs (rednet swarm_zone -> server) and relay the
--- server's grant back to the requesting miner
+-- server's grant back to the requesting miner. KEYED: a wrong-key zone
+-- message is dropped so nobody can grief the zone registry.
 local function pumpZones(ws)
     while true do
         local id, msg = rednet.receive("swarm_zone")
-        if type(msg) == "table" and msg.site then
+        if Swarm.ok(msg) and msg.site then
             local ok = pcall(ws.send, textutils.serializeJSON({
                 type = "zone", op = msg.op, site = msg.site, miner = id, idx = msg.idx,
             }))
@@ -87,7 +87,8 @@ local function pumpWebsocket(ws)
                 os.reboot()
             end
         elseif type(m) == "table" and m.type == "zone_grant" and m.miner ~= nil then
-            rednet.send(m.miner, { type = "grant", idx = m.idx }, "swarm_zone")
+            -- keyed so the miner trusts the grant
+            Swarm.to(m.miner, { type = "grant", idx = m.idx }, "swarm_zone")
         end
     end
 end
