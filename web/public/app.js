@@ -4,6 +4,7 @@ const ROLE_COLOR = { miner: "#3fb950", courier: "#58a6ff", fueler: "#d29922" };
 const STALE_MS = 15000;
 
 const turtles = new Map(); // id -> { data, last }
+let lastKnown = {};        // id(str) -> { label, pos, level, role, site, zoneIdx, ts }
 const ores = [];           // { n, x, y, z }
 let zonesData = {};        // site -> { done:{idx}, claims:{} }
 let ws, reconnectT;
@@ -31,6 +32,7 @@ function connect() {
     if (m.type === "snapshot") {
       turtles.clear();
       for (const t of m.turtles) turtles.set(t.id, { data: t.data, last: Date.now() - (t.age || 0) });
+      if (m.lastKnown) lastKnown = m.lastKnown;
       meta = { latest: m.latest, server: m.server, bridge: m.bridge };
       ores.length = 0;
       if (Array.isArray(m.ores)) for (const o of m.ores) ores.push(o);
@@ -63,6 +65,15 @@ function connect() {
         z.prog ||= {};
         if (z.prog[d.slot] == null || d.level < z.prog[d.slot]) z.prog[d.slot] = d.level;
       }
+      // keep local lastKnown in sync so we have a record if it goes offline
+      { const rec = (lastKnown[m.id] ||= {});
+        if (d.label) rec.label = d.label;
+        if (d.pos)   rec.pos   = d.pos;
+        if (d.level != null) rec.level = d.level;
+        if (d.site)  rec.site  = d.site;
+        if (d.zoneIdx != null) rec.zoneIdx = d.zoneIdx;
+        if (d.role)  rec.role  = d.role;
+        rec.ts = Date.now(); }
       if (m.id === watchId) updateDetailHeader();
     } else if (m.type === "log") {
       if (m.id !== watchId) return;
@@ -77,6 +88,7 @@ function connect() {
       if (ores.length > 4000) ores.splice(0, ores.length - 4000);
     } else if (m.type === "gone") {
       turtles.delete(m.id);
+      // keep lastKnown — offline turtle shows its last position in the list
     }
     render();
   };
@@ -234,6 +246,30 @@ function fmtFuel(f) {
 }
 function roleColor(r) { return ROLE_COLOR[r] || "#8b97a7"; }
 
+function fmtAgo(ts, now) {
+  if (!ts) return "unknown";
+  const s = Math.round((now - ts) / 1000);
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  return Math.round(s / 3600) + "h ago";
+}
+function offlineCardHtml(id, now) {
+  const r = lastKnown[id] || {};
+  const c = roleColor(r.role);
+  const ago = fmtAgo(r.ts, now);
+  const posStr = r.pos ? `X${r.pos.x} Y${r.pos.y} Z${r.pos.z}` : "pos unknown";
+  const layer = r.level != null ? ` · Y${r.level}` : "";
+  const zone  = r.zoneIdx != null ? ` · zone ${r.zoneIdx}` : "";
+  return `<div class="card stale ${+id === watchId ? "sel" : ""}" data-id="${id}">
+    <span class="dot" style="background:${c};opacity:0.5"></span>
+    <div>
+      <span class="name" style="color:var(--dim)">${esc(r.label || ("#" + id))}</span>
+      <div class="sub">#${id} · offline · ${ago}${zone}${layer}</div>
+      <div class="sub" style="font-size:11px;color:#5a6472">${posStr}</div>
+    </div>
+    <div class="right" style="font-size:11px;color:var(--dim)">◌</div>
+  </div>`;
+}
 function cardHtml(id, now) {
   const t = turtles.get(id), d = t.data;
   const stale = now - t.last > STALE_MS;
@@ -257,7 +293,12 @@ function cardHtml(id, now) {
 function renderList() {
   const now = Date.now();
   const ids = [...turtles.keys()];
-  document.getElementById("count").textContent = ids.length + " turtles";
+  const offlineIds = Object.keys(lastKnown).map(Number)
+    .filter(id => !turtles.has(id))
+    .sort((a, b) => (lastKnown[b]?.ts || 0) - (lastKnown[a]?.ts || 0));
+  const liveCount = ids.length, offCount = offlineIds.length;
+  document.getElementById("count").textContent =
+    liveCount + " live" + (offCount ? ` · ${offCount} offline` : "");
   const groups = { miner: [], courier: [], fueler: [], other: [] };
   for (const id of ids) (groups[turtles.get(id).data.role] || groups.other).push(id);
   const titles = { miner: "⛏ Miners", courier: "📦 Couriers", fueler: "⛽ Fuelers", other: "• Other" };
@@ -269,8 +310,12 @@ function renderList() {
     html += `<div class="group" style="color:${roleColor(role)}">${titles[role]} · ${g.length}</div>`;
     html += g.map((id) => cardHtml(id, now)).join("");
   }
+  if (offlineIds.length) {
+    html += `<div class="group" style="color:var(--dim)">◌ Offline · ${offlineIds.length}</div>`;
+    html += offlineIds.map(id => offlineCardHtml(id, now)).join("");
+  }
   document.getElementById("list").innerHTML =
-    html || `<div class="card"><div class="sub">no turtles reporting…</div></div>`;
+    (html || `<div class="card"><div class="sub">no turtles reporting…</div></div>`);
 }
 function esc(s) { return String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])); }
 
@@ -338,6 +383,19 @@ function renderMap() {
     ctx.fillStyle = oreColor(o.n);
     ctx.fillRect(ox - 1.5, oy - 1.5, 3, 3);
   }
+
+  // offline turtles (lastKnown, not live) — dim markers so you can find them
+  ctx.globalAlpha = 0.28;
+  for (const [sid, r] of Object.entries(lastKnown)) {
+    if (turtles.has(+sid) || !r.pos) continue;
+    const px = X(r.pos.x), py = Y(r.pos.z);
+    if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
+    ctx.fillStyle = roleColor(r.role);
+    ctx.beginPath(); ctx.arc(px, py, 4, 0, 7); ctx.fill();
+    ctx.fillStyle = "#8b97a7"; ctx.font = "10px ui-monospace, monospace";
+    ctx.fillText(`${esc(r.label || ("#" + sid))} †`, px + 7, py + 4);
+  }
+  ctx.globalAlpha = 1;
 
   // turtles
   const now = Date.now();

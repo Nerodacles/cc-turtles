@@ -47,9 +47,14 @@ const LOG_CAP = 300;
 // request the lowest free spiral index; it survives crashes/home/restart.
 const DATA = process.env.DATA_DIR || "/data";
 const ZONES_FILE = path.join(DATA, "zones.json");
+const TURTLES_FILE = path.join(DATA, "turtles.json");
 const CLAIM_TTL = parseInt(process.env.CLAIM_TTL_MS || "1800000", 10); // 30m
 let zones = {};
 try { zones = JSON.parse(fs.readFileSync(ZONES_FILE, "utf8")); } catch { zones = {}; }
+// lastKnown: persisted label/pos/level per turtle so a pod restart doesn't
+// lose the last known position of every turtle (e.g. to find a lost turtle).
+let lastKnown = {};
+try { lastKnown = JSON.parse(fs.readFileSync(TURTLES_FILE, "utf8")); } catch { lastKnown = {}; }
 let saveT = null;
 function saveZones() { // debounced write
   if (saveT) return;
@@ -58,6 +63,15 @@ function saveZones() { // debounced write
     try { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(ZONES_FILE, JSON.stringify(zones)); }
     catch (e) { console.error("[zones] save failed:", e.message); }
   }, 500);
+}
+let saveTurtlesT = null;
+function saveTurtles() { // debounced write
+  if (saveTurtlesT) return;
+  saveTurtlesT = setTimeout(() => {
+    saveTurtlesT = null;
+    try { fs.writeFileSync(TURTLES_FILE, JSON.stringify(lastKnown)); }
+    catch (e) { console.error("[turtles] save failed:", e.message); }
+  }, 2000);
 }
 function siteKey(s) { return `${s.x},${s.y},${s.z}`; }
 // every zone record has { done, claims, prog }. prog[idx] = deepest Y
@@ -124,7 +138,7 @@ const server = http.createServer((req, res) => {
   if (urlPath === "/api/state") {
     const now = Date.now();
     const out = { latest: LATEST, server: LATEST, bridge: bridgeVer,
-                  bridges: bridges.size, browsers: browsers.size, turtles: [] };
+                  bridges: bridges.size, browsers: browsers.size, turtles: [], lastKnown };
     for (const [id, t] of turtles) out.turtles.push({ id, label: t.data.label, role: t.data.role, age: now - t.last });
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(out, null, 2));
@@ -182,7 +196,7 @@ wss.on("connection", (ws) => {
         const snap = [];
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
         send(ws, { type: "snapshot", turtles: snap, ores, needKey: !!CMD_KEY,
-                   zones, latest: LATEST, server: LATEST, bridge: bridgeVer });
+                   zones, lastKnown, latest: LATEST, server: LATEST, bridge: bridgeVer });
       }
       return;
     }
@@ -211,6 +225,17 @@ wss.on("connection", (ws) => {
       if (msg.data.role === "miner" && msg.data.site && msg.data.zoneIdx != null)
         touchClaim(msg.data.site, msg.id, msg.data.zoneIdx, msg.data.level);
       turtles.set(msg.id, { data: msg.data, last: Date.now() });
+      // persist last known label/pos/level so a restart doesn't lose
+      // where a turtle was (e.g. to locate a lost/silent turtle)
+      { const d = msg.data, rec = (lastKnown[msg.id] ||= {});
+        if (d.label) rec.label = d.label;
+        if (d.pos)   rec.pos   = d.pos;
+        if (d.level != null) rec.level = d.level;
+        if (d.site)  rec.site  = d.site;
+        if (d.zoneIdx != null) rec.zoneIdx = d.zoneIdx;
+        if (d.role)  rec.role  = d.role;
+        rec.ts = Date.now();
+        saveTurtles(); }
       broadcast(browsers, { type: "status", id: msg.id, data: msg.data });
       return;
     }
