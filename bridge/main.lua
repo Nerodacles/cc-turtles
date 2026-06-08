@@ -66,6 +66,14 @@ local function pumpWebsocket(ws)
             m.payload.k = Swarm.KEY  -- inherit the swarm auth
             rednet.broadcast(m.payload, Swarm.PROTO_CMD)
             print("[bridge] cmd -> swarm: " .. tostring(m.payload.cmd))
+            -- 'update' updates the swarm AND the bridge itself (rednet
+            -- doesn't deliver our own broadcast, so reboot explicitly;
+            -- startup re-downloads our code)
+            if m.payload.cmd == "update" then
+                print("[bridge] update -> rebooting self...")
+                os.sleep(0.5)
+                os.reboot()
+            end
         end
     end
 end
