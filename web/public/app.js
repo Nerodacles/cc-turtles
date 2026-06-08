@@ -324,6 +324,29 @@ const cv = document.getElementById("map");
 const ctx = cv.getContext("2d");
 let view = { ox: 0, oz: 0, scale: 2, drag: null };
 
+// Zone geometry — mirror of the miner's chebyshev spiral so the server's
+// persisted zone records (which only store the spiral idx) can be drawn at
+// their real X/Z. Must match miner/main.lua: ZONE_SPREAD + gridOffset.
+const ZONE_SPREAD = 16;
+function gridOffset(k) {
+  if (k === 0) return [0, 0];
+  let r = 1, count = 1;
+  while (k >= count + 8 * r) { count += 8 * r; r += 1; }
+  const i = k - count;
+  const cells = [];
+  for (let x = -r; x <= r; x++)
+    for (let z = -r; z <= r; z++)
+      if (Math.max(Math.abs(x), Math.abs(z)) === r) cells.push([x, z]);
+  return cells[i];  // i-th ring cell
+}
+// site is "x,y,z"; idx is the spiral slot. idx+1 because cell (0,0) is the
+// shared junction, not a mineable zone (matches setZone in the miner).
+function zonePos(siteKey, idx) {
+  const [sx, , sz] = siteKey.split(",").map(Number);
+  const [gx, gz] = gridOffset(idx + 1);
+  return { x: sx + gx * ZONE_SPREAD, z: sz + gz * ZONE_SPREAD };
+}
+
 function fit() {
   // Size the backing store to the canvas's OWN CSS box (dpr-aware).
   // Called every render: a no-op when unchanged, but if the layout
@@ -376,6 +399,47 @@ function renderMap() {
     for (let gy = (Y(cz) % step + h) % step; gy < h; gy += step) line(0, gy, w, gy);
   }
 
+  // ZONES — every zone the server has on record (done / claimed / mined),
+  // drawn at its real spiral position so they persist on the map even when
+  // no turtle is live. Zones with a live miner = bright; old ones = faint.
+  const liveZone = new Set();   // "siteKey:idx" currently being mined
+  for (const [, t] of turtles) {
+    const d = t.data;
+    if (d.role === "miner" && d.site && d.slot != null)
+      liveZone.add(`${d.site.x},${d.site.y},${d.site.z}:${d.slot}`);
+  }
+  const half = (ZONE_SPREAD / 2 - 1) * view.scale;  // small gap between cells
+  for (const [sk, zr] of Object.entries(zonesData)) {
+    if (!zr) continue;
+    const idxs = new Set();
+    for (const k of Object.keys(zr.done || {})) idxs.add(+k);
+    for (const c of Object.values(zr.claims || {})) idxs.add(c.idx);
+    for (const k of Object.keys(zr.prog || {})) idxs.add(+k);
+    for (const idx of idxs) {
+      const p = zonePos(sk, idx);
+      const zx = X(p.x) - half, zy = Y(p.z) - half;
+      if (zx < -half * 2 || zx > w || zy < -half * 2 || zy > h) continue;
+      const live = liveZone.has(`${sk}:${idx}`);
+      const done = !!(zr.done && zr.done[idx]);
+      // current = bright green; done (old) = faint green; touched but not
+      // done (abandoned/partial) = faint grey
+      const col = live ? "63,185,80" : done ? "63,185,80" : "139,151,167";
+      ctx.fillStyle   = `rgba(${col},${live ? 0.14 : 0.05})`;
+      ctx.strokeStyle = `rgba(${col},${live ? 0.85 : 0.22})`;
+      ctx.lineWidth = live ? 1.5 : 1;
+      ctx.fillRect(zx, zy, half * 2, half * 2);
+      ctx.strokeRect(zx, zy, half * 2, half * 2);
+      // label only when zoomed in enough to read it
+      if (view.scale >= 1.4) {
+        ctx.fillStyle = `rgba(${col},${live ? 0.9 : 0.4})`;
+        ctx.font = "9px ui-monospace, monospace";
+        const tag = "z" + idx + (done ? " ✓" : "") +
+          (zr.prog && zr.prog[idx] != null ? " Y" + zr.prog[idx] : "");
+        ctx.fillText(tag, zx + 3, zy + 11);
+      }
+    }
+  }
+
   // discovered ores (under the turtles)
   for (const o of ores) {
     const ox = X(o.x), oy = Y(o.z);
@@ -404,16 +468,8 @@ function renderMap() {
     const px = X(p.x), py = Y(p.z);
     const stale = now - t.last > STALE_MS;
     const c = roleColor(d.role);
-    // zone marker + label for miners
-    if (d.role === "miner" && d.claim) {
-      ctx.strokeStyle = c + "55"; ctx.lineWidth = 1;
-      const half = 5.5 * view.scale;
-      const zx = X(d.claim.x) - half, zy = Y(d.claim.z) - half;
-      ctx.strokeRect(zx, zy, half * 2, half * 2);
-      ctx.fillStyle = c + "cc"; ctx.font = "10px ui-monospace, monospace";
-      const tag = (d.label || ("#" + id)) + (d.slot != null ? " · z" + d.slot : "");
-      ctx.fillText(tag, zx + 4, zy + 12);
-    }
+    // (zone rectangles are drawn as a persistent layer above, from the
+    // server's zone records — no longer per-live-turtle here)
     ctx.globalAlpha = stale ? 0.4 : 1;
     ctx.fillStyle = c;
     ctx.beginPath(); ctx.arc(px, py, 5, 0, 7); ctx.fill();
