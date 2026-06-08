@@ -211,11 +211,15 @@ function renderMap() {
     const px = X(p.x), py = Y(p.z);
     const stale = now - t.last > STALE_MS;
     const c = roleColor(d.role);
-    // zone marker for miners
+    // zone marker + label for miners
     if (d.role === "miner" && d.claim) {
       ctx.strokeStyle = c + "55"; ctx.lineWidth = 1;
       const half = 5.5 * view.scale;
-      ctx.strokeRect(X(d.claim.x) - half, Y(d.claim.z) - half, half * 2, half * 2);
+      const zx = X(d.claim.x) - half, zy = Y(d.claim.z) - half;
+      ctx.strokeRect(zx, zy, half * 2, half * 2);
+      ctx.fillStyle = c + "cc"; ctx.font = "10px ui-monospace, monospace";
+      const tag = (d.label || ("#" + id)) + (d.slot != null ? " · z" + d.slot : "");
+      ctx.fillText(tag, zx + 4, zy + 12);
     }
     ctx.globalAlpha = stale ? 0.4 : 1;
     ctx.fillStyle = c;
