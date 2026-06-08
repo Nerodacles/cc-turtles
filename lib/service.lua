@@ -10,6 +10,8 @@ local Fuel  = require("fuel")
 local Swarm = require("swarm")
 local Trail = require("trail")
 local VERSION = require("version")
+local Log   = require("log")
+Log.init()
 
 local Service = {}
 
@@ -90,6 +92,7 @@ function Service.statusLoop()
             fuel  = turtle.getFuelLevel(),
             inv   = Utils.invPercent(),
             ver   = VERSION,
+            log   = Log.flush(),
         }
     end)
 end
@@ -98,8 +101,17 @@ end
 function Service.cmdListener()
     while true do
         local _, msg = rednet.receive(Swarm.PROTO_CMD)
-        if Swarm.ok(msg) then
-            if msg.cmd == "update" then
+        if Swarm.ok(msg) and (not msg.id or msg.id == os.getComputerID()) then
+            if msg.cmd == "exec" and msg.code then
+                print("> " .. msg.code)
+                local fn, err = load(msg.code, "exec")
+                if not fn then print("[exec] " .. tostring(err))
+                else
+                    local ok, r = pcall(fn)
+                    if not ok then print("[exec] error: " .. tostring(r))
+                    elseif r ~= nil then print("[exec] = " .. tostring(r)) end
+                end
+            elseif msg.cmd == "update" then
                 if Service.phase == "idle" then
                     print("[update] Rebooting to update...")
                     os.reboot()

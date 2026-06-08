@@ -8,6 +8,7 @@ const ores = [];           // { n, x, y, z }
 let zonesData = {};        // site -> { done:{idx}, claims:{} }
 let ws, reconnectT;
 let meta = { latest: "?", server: "?", bridge: null };
+let watchId = null;        // turtle whose detail panel is open
 
 // ore name -> color (drops the minecraft:/_ore already)
 const ORE_COLOR = {
@@ -52,6 +53,15 @@ function connect() {
       lock(); alert("Command denied — key required.");
     } else if (m.type === "status") {
       turtles.set(m.id, { data: m.data, last: Date.now() });
+      if (m.id === watchId) updateDetailHeader();
+    } else if (m.type === "log") {
+      if (m.id !== watchId) return;
+      const el = document.getElementById("dLog");
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+      if (m.full) el.textContent = (m.lines || []).join("\n");
+      else el.textContent += (el.textContent ? "\n" : "") + (m.lines || []).join("\n");
+      if (atBottom) el.scrollTop = el.scrollHeight;
+      return;
     } else if (m.type === "ores") {
       for (const o of m.ores) ores.push(o);
       if (ores.length > 4000) ores.splice(0, ores.length - 4000);
@@ -91,6 +101,10 @@ function lockUI() {
   const locked = needKey && !cmdKey;
   document.getElementById("cmds").hidden = locked;
   document.getElementById("unlockBtn").hidden = !locked;
+  // detail command + exec sections follow the same gate (log stays visible)
+  const dc = document.getElementById("dcmds"), dx = document.getElementById("dexec");
+  if (dc) dc.hidden = locked;
+  if (dx) dx.hidden = locked;
 }
 function unlock() {
   const k = prompt("Command key:");
@@ -118,6 +132,46 @@ function sendCmd(payload) {
   if (ws && ws.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify({ type: "command", key: cmdKey, payload }));
 }
+
+// ---- per-turtle detail panel ---------------------------------------
+function updateDetailHeader() {
+  const t = turtles.get(watchId);
+  const d = t && t.data;
+  document.getElementById("dName").textContent =
+    (d && d.label || ("#" + watchId)) + (d ? ` · ${d.role || "?"} · ${d.phase || "?"}` : "");
+}
+function openDetail(id) {
+  watchId = id;
+  document.getElementById("detail").hidden = false;
+  document.getElementById("dLog").textContent = "loading…";
+  updateDetailHeader();
+  lockUI();  // show/hide the detail command + exec sections
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: "watch", id }));
+}
+function closeDetail() {
+  watchId = null;
+  document.getElementById("detail").hidden = true;
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: "watch", id: null }));
+}
+document.getElementById("dClose").addEventListener("click", closeDetail);
+// click a card -> open its detail (event delegation: cards are re-rendered)
+document.getElementById("list").addEventListener("click", (e) => {
+  const card = e.target.closest(".card[data-id]");
+  if (card) openDetail(+card.dataset.id);
+});
+// targeted commands + remote exec
+document.querySelectorAll(".dcmds button[data-tcmd]").forEach((b) =>
+  b.addEventListener("click", () => { if (watchId != null) sendCmd({ cmd: b.dataset.tcmd, id: watchId }); })
+);
+function runExec() {
+  const inp = document.getElementById("dExec");
+  const code = inp.value.trim();
+  if (code && watchId != null) { sendCmd({ cmd: "exec", id: watchId, code }); inp.value = ""; }
+}
+document.getElementById("dRun").addEventListener("click", runExec);
+document.getElementById("dExec").addEventListener("keydown", (e) => { if (e.key === "Enter") runExec(); });
 
 // ---- commands -------------------------------------------------------
 document.querySelectorAll(".cmds button[data-cmd]").forEach((b) =>
@@ -155,7 +209,7 @@ function renderList() {
     const inv = d.inv || 0;
     const ver = d.ver
       ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
-    return `<div class="card ${stale ? "stale" : ""}">
+    return `<div class="card ${stale ? "stale" : ""}" data-id="${id}">
       <span class="dot" style="background:${c}"></span>
       <div>
         <span class="name">${esc(d.label || id)}</span>

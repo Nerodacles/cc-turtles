@@ -71,3 +71,30 @@ main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; 
 .role-tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; margin-left: 6px; }
 .bar { height: 4px; border-radius: 2px; background: #2b3340; margin-top: 4px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--courier); }
+.card { cursor: pointer; }
+
+/* detail drawer (over the list) */
+#detail {
+  position: absolute; right: 0; top: 0; width: 360px; height: 100%;
+  background: var(--panel); border-left: 1px solid var(--line);
+  display: flex; flex-direction: column; z-index: 5;
+}
+@media (max-width: 820px) { #detail { width: 100%; } }
+#detail header {
+  display: flex; align-items: center; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); background: var(--bg);
+}
+#detail header b { font-size: 14px; }
+#dClose { margin-left: auto; padding: 2px 8px; }
+.dcmds { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); }
+.dcmds button { padding: 5px 8px; font-size: 12px; }
+#dLog {
+  flex: 1; margin: 0; padding: 8px 12px; overflow-y: auto; font-size: 11px;
+  line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+  color: #b7c1cf; background: #0d1117;
+}
+.dexec { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); }
+.dexec input { flex: 1; background: #0d1117; border: 1px solid var(--line);
+  color: var(--ink); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
+.dexec button { padding: 6px 12px; }

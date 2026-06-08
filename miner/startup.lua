@@ -57,6 +57,8 @@ else
     local Nav   = require("nav")
     local Trail = require("trail")
     local VERSION = require("version")
+    local Log   = require("log")
+    Log.init()
 
     -- Lost-turtle recovery: idle far from home with a trail? walk the
     -- journal backwards step by step (no GPS/facing trust needed).
@@ -163,6 +165,7 @@ else
                 fuel  = turtle.getFuelLevel(),
                 inv   = 0,
                 ver   = VERSION,
+                log   = Log.flush(),
             }
         end)
     end

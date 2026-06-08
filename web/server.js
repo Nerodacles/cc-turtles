@@ -39,6 +39,8 @@ let bridgeVer = null;
 const turtles = new Map(); // id -> { data, last }
 const ores = [];           // discovered ores: { n, x, y, z } (capped FIFO)
 const ORE_CAP = 4000;
+const logs = new Map();     // id -> [recent log lines] (per turtle)
+const LOG_CAP = 300;
 
 // ---- ZONE REGISTRY (authoritative, persisted to the PVC) ------------
 // Per site "x,y,z": { done:{idx:1}, claims:{minerId:{idx,ts}} }. Miners
@@ -188,6 +190,15 @@ wss.on("connection", (ws) => {
         }
         broadcast(browsers, { type: "ores", ores: newOres });
       }
+      // pull log lines out of the heartbeat into the per-turtle log
+      const newLog = Array.isArray(msg.data.log) ? msg.data.log : null;
+      if (newLog) {
+        delete msg.data.log;
+        let arr = logs.get(msg.id); if (!arr) { arr = []; logs.set(msg.id, arr); }
+        for (const ln of newLog) { arr.push(ln); if (arr.length > LOG_CAP) arr.shift(); }
+        // stream only to browsers watching this turtle
+        for (const b of browsers) if (b.watching === msg.id) send(b, { type: "log", id: msg.id, lines: newLog });
+      }
       // renew this miner's zone claim from its heartbeat
       if (msg.data.role === "miner" && msg.data.site && msg.data.zoneIdx != null)
         touchClaim(msg.data.site, msg.id, msg.data.zoneIdx);
@@ -207,6 +218,14 @@ wss.on("connection", (ws) => {
         send(ws, { type: "zone_grant", miner: msg.miner, idx });
         broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
       }
+      return;
+    }
+
+    // A browser watches one turtle's log: send the stored log, then
+    // stream live appends for that id only
+    if (ws.role === "browser" && msg.type === "watch") {
+      ws.watching = msg.id;
+      if (msg.id != null) send(ws, { type: "log", id: msg.id, full: true, lines: logs.get(msg.id) || [] });
       return;
     }
 

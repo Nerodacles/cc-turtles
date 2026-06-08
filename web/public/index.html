@@ -33,6 +33,24 @@
       <div id="maphint">top-down · X→ · Z↓ · scroll to zoom · drag to pan</div>
     </section>
     <section id="list"></section>
+
+    <aside id="detail" hidden>
+      <header>
+        <b id="dName">turtle</b>
+        <button id="dClose">✕</button>
+      </header>
+      <div class="dcmds" id="dcmds" hidden>
+        <button data-tcmd="pause">⏸ pause</button>
+        <button data-tcmd="resume">⏵ resume</button>
+        <button data-tcmd="stop" class="warn">⏏ home</button>
+        <button data-tcmd="update" class="muted">⟳ update</button>
+      </div>
+      <pre id="dLog"></pre>
+      <div class="dexec" id="dexec" hidden>
+        <input id="dExec" placeholder="lua… e.g.  print(turtle.getFuelLevel())" />
+        <button id="dRun">run</button>
+      </div>
+    </aside>
   </main>
 
   <dialog id="entryDlg">
