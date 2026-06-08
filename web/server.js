@@ -60,10 +60,16 @@ const server = http.createServer((req, res) => {
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end("forbidden"); }
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404); return res.end("not found"); }
+    // Cloudflare caches .js/.css by extension and ignores our headers,
+    // so cache-bust: inject ?v=LATEST into the asset URLs of the HTML
+    // (CF doesn't cache HTML). A version bump = new URL = fresh assets.
+    if (file.endsWith("index.html")) {
+      buf = Buffer.from(buf.toString()
+        .replace('href="style.css"', `href="style.css?v=${LATEST}"`)
+        .replace('src="app.js"', `src="app.js?v=${LATEST}"`));
+    }
     res.writeHead(200, {
       "Content-Type": MIME[path.extname(file)] || "application/octet-stream",
-      // always revalidate the dashboard assets so a deploy is picked
-      // up immediately (the dashboard is small; no caching needed)
       "Cache-Control": "no-cache, no-store, must-revalidate",
     });
     res.end(buf);
