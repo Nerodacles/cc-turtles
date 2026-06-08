@@ -1,7 +1,18 @@
 # No-build deploy: a node:22-alpine pod clones the public repo and runs
-# the server (no registry/docker needed). Tailscale Ingress, matching
-# the devops kite/uptime-kuma pattern. For production, build a real
-# image (web/Dockerfile) and use web/k8s.yaml instead.
+# the server (no registry/docker needed). Traefik IngressRoute (public).
+# For production, build a real image (web/Dockerfile) and use k8s.yaml.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cc-turtles-data
+  namespace: devops
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 256Mi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,6 +61,12 @@ spec:
           resources:
             requests: { cpu: 25m, memory: 64Mi }
             limits:   { cpu: 250m, memory: 192Mi }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cc-turtles-data
 ---
 apiVersion: v1
 kind: Service

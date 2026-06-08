@@ -267,22 +267,50 @@ local function negotiateSlot()
         end
 
         if not contested then
-            state.slot = slot
-            -- slot+1: cell (0,0) is the shared junction every tunnel
-            -- radiates from - nobody's room may sit on top of it
-            local gx, gz = gridOffset(slot + 1)
-            state.shaft  = { x = state.site.x, z = state.site.z }
-            state.center = { x = state.site.x + gx * ZONE_SPREAD,
-                             z = state.site.z + gz * ZONE_SPREAD }
-            Utils.saveState(state)
-            print("[site] Slot " .. slot .. " | entry " .. state.shaft.x ..
-                  "," .. state.shaft.z .. " | zone " .. state.center.x ..
-                  "," .. state.center.z)
-            return
+            print("[site] Local slot " .. slot)
+            return slot
         end
         print("[site] Slot " .. slot .. " contested - renegotiating...")
         os.sleep(math.random() * 2)
     end
+end
+
+-- Compute and persist the shaft + zone center for a zone index.
+-- idx+1: cell (0,0) is the shared junction every tunnel radiates from,
+-- so no room sits on the hub.
+local function setZone(idx)
+    state.slot   = idx
+    local gx, gz = gridOffset(idx + 1)
+    state.shaft  = { x = state.site.x, z = state.site.z }
+    state.center = { x = state.site.x + gx * ZONE_SPREAD,
+                     z = state.site.z + gz * ZONE_SPREAD }
+    Utils.saveState(state)
+    print("[zone] idx " .. idx .. " | zone " .. state.center.x ..
+          "," .. state.center.z)
+end
+
+-- Ask the SERVER (via the bridge) for the next free zone index - it is
+-- authoritative and persisted, so done zones are never re-mined. Falls
+-- back to decentralized local negotiation if no server/bridge answers.
+local function acquireZone()
+    currentPhase = "zoning"
+    rednet.broadcast({ op = "request", site = state.site }, "swarm_zone")
+    local deadline = os.clock() + 4
+    while os.clock() < deadline do
+        local _, m = rednet.receive("swarm_zone", 0.5)
+        if type(m) == "table" and m.type == "grant" and m.idx ~= nil then
+            print("[zone] Server granted idx " .. m.idx)
+            return m.idx
+        end
+    end
+    print("[zone] No server - decentralized negotiation")
+    return negotiateSlot()
+end
+
+-- Tell the server a zone is fully mined (so nobody re-mines it)
+local function reportZoneDone(idx)
+    if idx == nil then return end
+    rednet.broadcast({ op = "done", site = state.site, idx = idx }, "swarm_zone")
 end
 
 -- Answer slot queries/claims (latecomers and claim-verifiers learn
@@ -360,6 +388,8 @@ local function statusLoop()
             inv   = Utils.invPercent(),
             claim = state.center,  -- my zone, for the dashboard
             slot  = state.slot,
+            site  = state.site,    -- for the server's zone-claim renewal
+            zoneIdx = state.slot,
             ver   = VERSION,
             ores  = (#ob > 0) and ob or nil,
         }
@@ -889,6 +919,38 @@ local function descendLevel()
 end
 
 -- ============================================================
+-- RELOCATE: this zone is mined out. Climb our center column to the
+-- tunnel level, return to the shaft junction, mark the zone done,
+-- acquire a FRESH zone and tunnel out to it - continuous expansion,
+-- all at the Y=MINING_Y tunnel level (the entry shaft is untouched).
+-- Returns true if a new zone was acquired and reached.
+-- ============================================================
+local function relocateToNewZone()
+    currentPhase = "relocate"
+    -- climb our own center column up to the tunnel level
+    while state.depth > targetDepth() do
+        Utils.up(state)
+        state.depth = state.depth - 1
+        Utils.saveState(state)
+    end
+    walkTo(state.shaft.x, state.shaft.z, "zx")  -- back to the hub
+
+    reportZoneDone(state.slot)
+    local idx = acquireZone()
+    if idx == nil then return false end
+    setZone(idx)
+
+    currentPhase = "tunnel"
+    if not walkTo(state.center.x, state.center.z, "xz") then
+        return false  -- lava wall to the new zone
+    end
+    state.room = { px = 0, pz = 0, facing = Nav.facing }
+    state.room.step = 0
+    Utils.saveState(state)
+    return true
+end
+
+-- ============================================================
 -- SERVICE TRIP: rooms have no open column above, so couriers and
 -- fuelers meet us at OUR SHAFT. Climb the center column (open from
 -- stacked levels), retrace the tunnel, run fn, come back.
@@ -1025,7 +1087,7 @@ local function mission()
         print("[init] Home saved: " .. home.x .. "," .. home.y .. "," .. home.z)
     end
     if not state.slot then
-        negotiateSlot()
+        setZone(acquireZone())
     end
 
     if state.phase == "goto" then
@@ -1142,8 +1204,11 @@ local function mission()
             local nextY = state.topY - state.depth - LEVEL_STEP
             if not stopFlag and nextY >= MIN_Y and descendLevel() then
                 print("[room] Next level: Y=" .. (state.topY - state.depth))
+            elseif not stopFlag and relocateToNewZone() then
+                -- zone exhausted -> moved to a fresh one, keep mining
+                print("[room] Zone done - relocated to a fresh zone")
             else
-                print("[room] Reached MIN_Y (or blocked) - heading home")
+                print("[room] No more zones (or stop) - heading home")
                 state.phase = "return"
             end
         elseif result == "stop" or result == "blocked" then

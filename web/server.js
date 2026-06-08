@@ -40,6 +40,53 @@ const turtles = new Map(); // id -> { data, last }
 const ores = [];           // discovered ores: { n, x, y, z } (capped FIFO)
 const ORE_CAP = 4000;
 
+// ---- ZONE REGISTRY (authoritative, persisted to the PVC) ------------
+// Per site "x,y,z": { done:{idx:1}, claims:{minerId:{idx,ts}} }. Miners
+// request the lowest free spiral index; it survives crashes/home/restart.
+const DATA = process.env.DATA_DIR || "/data";
+const ZONES_FILE = path.join(DATA, "zones.json");
+const CLAIM_TTL = parseInt(process.env.CLAIM_TTL_MS || "1800000", 10); // 30m
+let zones = {};
+try { zones = JSON.parse(fs.readFileSync(ZONES_FILE, "utf8")); } catch { zones = {}; }
+let saveT = null;
+function saveZones() { // debounced write
+  if (saveT) return;
+  saveT = setTimeout(() => {
+    saveT = null;
+    try { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(ZONES_FILE, JSON.stringify(zones)); }
+    catch (e) { console.error("[zones] save failed:", e.message); }
+  }, 500);
+}
+function siteKey(s) { return `${s.x},${s.y},${s.z}`; }
+function allocZone(site, miner) {
+  const k = siteKey(site);
+  const z = (zones[k] ||= { done: {}, claims: {} });
+  const now = Date.now();
+  // resume an existing live claim for this miner
+  const mine = z.claims[miner];
+  if (mine && now - mine.ts < CLAIM_TTL) { mine.ts = now; saveZones(); return mine.idx; }
+  // prune stale claims
+  for (const [m, c] of Object.entries(z.claims)) if (now - c.ts >= CLAIM_TTL) delete z.claims[m];
+  const taken = new Set(Object.values(z.claims).map((c) => c.idx));
+  let idx = 0;
+  while (z.done[idx] || taken.has(idx)) idx++;
+  z.claims[miner] = { idx, ts: now };
+  saveZones();
+  return idx;
+}
+function doneZone(site, miner, idx) {
+  const z = zones[siteKey(site)]; if (!z) return;
+  z.done[idx] = 1;
+  if (z.claims[miner] && z.claims[miner].idx === idx) delete z.claims[miner];
+  saveZones();
+}
+function touchClaim(site, miner, idx) { // renew from heartbeat
+  if (!site || idx == null) return;
+  const z = (zones[siteKey(site)] ||= { done: {}, claims: {} });
+  z.claims[miner] = { idx, ts: Date.now() };
+  saveZones();
+}
+
 // ---- static file server --------------------------------------------
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -51,6 +98,18 @@ const MIME = {
 
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+  // zone registry view / reset (reset frees a site to mine again)
+  if (urlPath === "/api/zones") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(zones, null, 2));
+  }
+  if (urlPath.startsWith("/api/zones/reset") && req.method === "POST") {
+    const site = decodeURIComponent((req.url.split("?site=")[1] || "").trim());
+    if (site && zones[site]) { delete zones[site]; saveZones(); }
+    else { zones = {}; saveZones(); }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true }));
+  }
   // debug: current state (is the bridge forwarding turtle status?)
   if (urlPath === "/api/state") {
     const now = Date.now();
@@ -113,7 +172,7 @@ wss.on("connection", (ws) => {
         const snap = [];
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
         send(ws, { type: "snapshot", turtles: snap, ores, needKey: !!CMD_KEY,
-                   latest: LATEST, server: LATEST, bridge: bridgeVer });
+                   zones, latest: LATEST, server: LATEST, bridge: bridgeVer });
       }
       return;
     }
@@ -129,8 +188,25 @@ wss.on("connection", (ws) => {
         }
         broadcast(browsers, { type: "ores", ores: newOres });
       }
+      // renew this miner's zone claim from its heartbeat
+      if (msg.data.role === "miner" && msg.data.site && msg.data.zoneIdx != null)
+        touchClaim(msg.data.site, msg.id, msg.data.zoneIdx);
       turtles.set(msg.id, { data: msg.data, last: Date.now() });
       broadcast(browsers, { type: "status", id: msg.id, data: msg.data });
+      return;
+    }
+
+    // ZONE allocation RPC (miner -> bridge -> here). Respond to the
+    // bridge, which relays the grant back to the requesting miner.
+    if (ws.role === "bridge" && msg.type === "zone" && msg.site && msg.miner != null) {
+      if (msg.op === "done") {
+        doneZone(msg.site, msg.miner, msg.idx);
+        broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
+      } else { // request
+        const idx = allocZone(msg.site, msg.miner);
+        send(ws, { type: "zone_grant", miner: msg.miner, idx });
+        broadcast(browsers, { type: "zones", site: siteKey(msg.site), z: zones[siteKey(msg.site)] });
+      }
       return;
     }
 
@@ -142,6 +218,15 @@ wss.on("connection", (ws) => {
 
     if (ws.role === "browser" && msg.type === "command" && msg.payload) {
       if (CMD_KEY && msg.key !== CMD_KEY) { send(ws, { type: "denied" }); return; }
+      // reset_zones is a SERVER action (free a site to be mined again),
+      // not a turtle command - handle it here, don't forward to bridges
+      if (msg.payload.cmd === "reset_zones") {
+        const s = msg.payload.site;
+        if (s && zones[s]) delete zones[s]; else zones = {};
+        saveZones();
+        broadcast(browsers, { type: "zones", site: s || "*", z: null });
+        return;
+      }
       // forward to every bridge; bridges add the swarm key + rebroadcast
       broadcast(bridges, { type: "command", payload: msg.payload });
       return;

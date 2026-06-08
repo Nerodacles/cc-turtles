@@ -5,6 +5,7 @@ const STALE_MS = 15000;
 
 const turtles = new Map(); // id -> { data, last }
 const ores = [];           // { n, x, y, z }
+let zonesData = {};        // site -> { done:{idx}, claims:{} }
 let ws, reconnectT;
 let meta = { latest: "?", server: "?", bridge: null };
 
@@ -33,8 +34,15 @@ function connect() {
       ores.length = 0;
       if (Array.isArray(m.ores)) for (const o of m.ores) ores.push(o);
       needKey = !!m.needKey;
+      zonesData = m.zones || {};
       lockUI();
       renderMeta();
+      renderZones();
+    } else if (m.type === "zones") {
+      if (m.site === "*" || m.z === null) {
+        if (m.site === "*") zonesData = {}; else delete zonesData[m.site];
+      } else { zonesData[m.site] = m.z; }
+      renderZones();
     } else if (m.type === "auth_ok") {
       localStorage.setItem("cmdkey", cmdKey);
       lockUI();
@@ -65,6 +73,16 @@ function renderMeta() {
   v.innerHTML = `latest <b>${esc(meta.latest)}</b>` +
     (meta.bridge ? ` · bridge <span class="${bad ? "vbad" : ""}">${esc(meta.bridge)}</span>` : "");
 }
+function renderZones() {
+  const el = document.getElementById("zones");
+  if (!el) return;
+  let done = 0, active = 0;
+  for (const z of Object.values(zonesData)) {
+    if (z && z.done) done += Object.keys(z.done).length;
+    if (z && z.claims) active += Object.keys(z.claims).length;
+  }
+  el.textContent = `${done} zones done · ${active} active`;
+}
 // ---- command key (gates the buttons; saved in localStorage) --------
 let cmdKey = localStorage.getItem("cmdkey") || "";
 let needKey = true;
@@ -89,6 +107,12 @@ function lock() {
 }
 document.getElementById("unlockBtn").addEventListener("click", unlock);
 document.getElementById("lockBtn").addEventListener("click", lock);
+document.getElementById("resetZonesBtn").addEventListener("click", () => {
+  if (confirm("Mark ALL zones as unmined? Miners will re-mine them.")) {
+    zonesData = {}; renderZones();
+    sendCmd({ cmd: "reset_zones" });
+  }
+});
 
 function sendCmd(payload) {
   if (ws && ws.readyState === WebSocket.OPEN)

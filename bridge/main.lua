@@ -57,7 +57,21 @@ local function pumpRednet(ws)
     end
 end
 
--- Forward dashboard commands to the swarm (re-signed with the key)
+-- Forward miner zone RPCs (rednet swarm_zone -> server) and relay the
+-- server's grant back to the requesting miner
+local function pumpZones(ws)
+    while true do
+        local id, msg = rednet.receive("swarm_zone")
+        if type(msg) == "table" and msg.site then
+            local ok = pcall(ws.send, textutils.serializeJSON({
+                type = "zone", op = msg.op, site = msg.site, miner = id, idx = msg.idx,
+            }))
+            if not ok then error("ws send failed", 0) end
+        end
+    end
+end
+
+-- Forward dashboard commands + relay server zone grants
 local function pumpWebsocket(ws)
     while true do
         local raw = ws.receive()
@@ -67,14 +81,13 @@ local function pumpWebsocket(ws)
             m.payload.k = Swarm.KEY  -- inherit the swarm auth
             rednet.broadcast(m.payload, Swarm.PROTO_CMD)
             print("[bridge] cmd -> swarm: " .. tostring(m.payload.cmd))
-            -- 'update' updates the swarm AND the bridge itself (rednet
-            -- doesn't deliver our own broadcast, so reboot explicitly;
-            -- startup re-downloads our code)
             if m.payload.cmd == "update" then
                 print("[bridge] update -> rebooting self...")
                 os.sleep(0.5)
                 os.reboot()
             end
+        elseif type(m) == "table" and m.type == "zone_grant" and m.miner ~= nil then
+            rednet.send(m.miner, { type = "grant", idx = m.idx }, "swarm_zone")
         end
     end
 end
@@ -85,6 +98,7 @@ while true do
     if ws then
         pcall(parallel.waitForAny,
             function() pumpRednet(ws) end,
+            function() pumpZones(ws) end,
             function() pumpWebsocket(ws) end)
         pcall(ws.close)
         print("[bridge] Disconnected - retrying in 3s")
