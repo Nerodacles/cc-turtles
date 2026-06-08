@@ -19,6 +19,9 @@ const { WebSocketServer } = require("ws");
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const STALE_MS = parseInt(process.env.STALE_MS || "20000", 10);
 const PUBLIC = path.join(__dirname, "public");
+// Command key: browsers must send this to issue commands. Empty = no
+// gate (anyone can command). Set CMD_KEY on the deployment.
+const CMD_KEY = process.env.CMD_KEY || "";
 
 // ---- LATEST version: read the single global lib/version.lua ---------
 // (the no-build pod clones the repo, so this file is right here)
@@ -109,7 +112,8 @@ wss.on("connection", (ws) => {
         const now = Date.now();
         const snap = [];
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
-        send(ws, { type: "snapshot", turtles: snap, ores, latest: LATEST, server: LATEST, bridge: bridgeVer });
+        send(ws, { type: "snapshot", turtles: snap, ores, needKey: !!CMD_KEY,
+                   latest: LATEST, server: LATEST, bridge: bridgeVer });
       }
       return;
     }
@@ -130,7 +134,14 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // Validate a command key (lets the dashboard unlock the buttons)
+    if (ws.role === "browser" && msg.type === "auth") {
+      send(ws, { type: CMD_KEY && msg.key !== CMD_KEY ? "auth_fail" : "auth_ok" });
+      return;
+    }
+
     if (ws.role === "browser" && msg.type === "command" && msg.payload) {
+      if (CMD_KEY && msg.key !== CMD_KEY) { send(ws, { type: "denied" }); return; }
       // forward to every bridge; bridges add the swarm key + rebroadcast
       broadcast(bridges, { type: "command", payload: msg.payload });
       return;

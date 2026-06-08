@@ -14,7 +14,8 @@ header {
   background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap;
 }
 header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-.cmds { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.cmds { display: flex; gap: 6px; flex-wrap: wrap; }
+.cmds, #unlockBtn { margin-left: auto; }
 button {
   font: inherit; cursor: pointer; color: var(--ink); background: #21262d;
   border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;

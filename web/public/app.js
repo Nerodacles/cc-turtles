@@ -32,7 +32,16 @@ function connect() {
       meta = { latest: m.latest, server: m.server, bridge: m.bridge };
       ores.length = 0;
       if (Array.isArray(m.ores)) for (const o of m.ores) ores.push(o);
+      needKey = !!m.needKey;
+      lockUI();
       renderMeta();
+    } else if (m.type === "auth_ok") {
+      localStorage.setItem("cmdkey", cmdKey);
+      lockUI();
+    } else if (m.type === "auth_fail") {
+      cmdKey = ""; lockUI(); alert("Wrong key.");
+    } else if (m.type === "denied") {
+      lock(); alert("Command denied — key required.");
     } else if (m.type === "status") {
       turtles.set(m.id, { data: m.data, last: Date.now() });
     } else if (m.type === "ores") {
@@ -56,9 +65,34 @@ function renderMeta() {
   v.innerHTML = `latest <b>${esc(meta.latest)}</b>` +
     (meta.bridge ? ` · bridge <span class="${bad ? "vbad" : ""}">${esc(meta.bridge)}</span>` : "");
 }
+// ---- command key (gates the buttons; saved in localStorage) --------
+let cmdKey = localStorage.getItem("cmdkey") || "";
+let needKey = true;
+
+function lockUI() {
+  const locked = needKey && !cmdKey;
+  document.getElementById("cmds").hidden = locked;
+  document.getElementById("unlockBtn").hidden = !locked;
+}
+function unlock() {
+  const k = prompt("Command key:");
+  if (k == null || k === "") return;
+  cmdKey = k;
+  // validate against the server; saved only if accepted
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ type: "auth", key: k }));
+}
+function lock() {
+  cmdKey = "";
+  localStorage.removeItem("cmdkey");
+  lockUI();
+}
+document.getElementById("unlockBtn").addEventListener("click", unlock);
+document.getElementById("lockBtn").addEventListener("click", lock);
+
 function sendCmd(payload) {
   if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({ type: "command", payload }));
+    ws.send(JSON.stringify({ type: "command", key: cmdKey, payload }));
 }
 
 // ---- commands -------------------------------------------------------
@@ -209,5 +243,5 @@ function renderLegend() {
 
 function render() { renderList(); renderMap(); renderLegend(); }
 
-fit(); connect();
+fit(); lockUI(); connect();
 setInterval(render, 1000); // refresh stale fades + ages
