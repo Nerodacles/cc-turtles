@@ -280,11 +280,17 @@ const ctx = cv.getContext("2d");
 let view = { ox: 0, oz: 0, scale: 2, drag: null };
 
 function fit() {
-  const r = cv.parentElement.getBoundingClientRect();
-  cv.width = r.width * devicePixelRatio; cv.height = r.height * devicePixelRatio;
+  // Size the backing store to the canvas's OWN CSS box (dpr-aware).
+  // Called every render: a no-op when unchanged, but if the layout
+  // shifted after the first paint (header wrap, flex settle, resize)
+  // it re-syncs - otherwise a too-tall buffer leaves an unclearable
+  // strip at the bottom that accumulates draws as you pan.
+  const w = Math.round(cv.clientWidth * devicePixelRatio);
+  const h = Math.round(cv.clientHeight * devicePixelRatio);
+  if (w && h && (cv.width !== w || cv.height !== h)) { cv.width = w; cv.height = h; }
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
 }
-window.addEventListener("resize", () => { fit(); renderMap(); });
+window.addEventListener("resize", renderMap);
 
 cv.addEventListener("wheel", (e) => {
   e.preventDefault();
@@ -303,6 +309,7 @@ window.addEventListener("mousemove", (e) => {
 
 let autoCenter = true;
 function renderMap() {
+  fit();  // keep the backing store matched to the display box every frame
   const w = cv.clientWidth, h = cv.clientHeight;
   ctx.clearRect(0, 0, w, h);
 
