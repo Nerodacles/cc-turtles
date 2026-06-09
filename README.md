@@ -44,6 +44,29 @@ A browser dashboard mirrors the pocket: live turtle cards + a top-down map (posi
 
 **Persisted logs** — every turtle log line (also streamed live to the per-turtle watch panel) is appended to a daily file on the PVC at `/data/logs/YYYY-MM-DD.log`, so they survive a pod restart. Files older than `LOG_RETAIN_DAYS` (default 7) are auto-deleted. Browse them (key-gated like the live watch): `GET /api/logs` lists the available days + sizes, `GET /api/logs?day=YYYY-MM-DD&key=KEY` returns that day's raw text. The map also persists last-known turtle positions and all mined zones across restarts (loaded from `turtles.json` / `zones.json` on the same PVC).
 
+**Map layers** — the top-down map draws the world to the zone-room lattice: each mined zone is a flush 16×16 tile (live = glowing, done, partial, claimed), discovered ores as a heat overlay, live miners with a short dig-path trail and a dashed link to their assigned zone (so a vein-chasing or shaft-transiting miner still reads as "belongs to zone N"), plus a compass, scale bar and origin marker. Multiple dig sites render side-by-side and the zone status line shows the site count once more than one is active.
+
+**Stats & ore yield** — the server tallies every discovered ore into `/data/stats.json` (current session + all-time totals + 90-day daily history) and the dashboard shows a per-ore panel (session count, rate/hour, total). A new session starts after the swarm is idle for `IDLE_SESSION_GAP_MS` (default 30 min). `reset_zones` does not touch stats.
+
+**Hazard layer** — miners broadcast `swarm_hazard` when they hit a lava lake, a spawner, or a large cavern; the dashboard draws them on the map (lava = red, spawner = orange, cavern = grey) and they persist in the snapshot.
+
+**Discord / webhook alerts** — set `WEBHOOK_URL` (a Discord-compatible webhook, injected as the `cc-turtles-webhook` Secret — never logged or sent to browsers) and the server pings on high-signal events only:
+
+| Event | Fires when |
+|---|---|
+| Rare find | a miner reports diamond / ancient debris / emerald |
+| Stranded | a turtle sits at 0 fuel still broadcasting (awaiting rescue) — pre-empts fuel-critical |
+| Fuel critical | `fuel < WEBHOOK_FUEL_THRESHOLD` (default 500) |
+| Miner stuck | heartbeating but no X/Z/Y progress for `STUCK_MS` (default 8 min) while mining |
+| Swarm idle | live miners present but none mining |
+| Site finished | every zone of a site is mined |
+| Hazard | a lava lake / spawner / cavern is reported |
+| Turtle offline | no heartbeat for `WEBHOOK_STALE_MS` (default 10 min) |
+
+Each fires once and re-arms on the opposite condition; a 90-second warm-up after a server restart suppresses the offline/stuck/idle alerts so a restart never floods the channel.
+
+**Read-only HTTP API** (token-gated by the `READ_KEY` env): `GET /api/state` (full snapshot), `GET /api/stats` (ore totals/history), `GET /api/turtles` (turtle list), `GET /api/logs` (daily logs). Pass the token as `Authorization: Bearer <key>` or `?key=<key>`.
+
 ```
 turtles ──rednet swarm_status──▶ bridge (CC computer) ──WebSocket──▶ Node server ──▶ browsers
                                        ◀────────────── commands ◀──────────────────
@@ -77,8 +100,10 @@ Limits to know: the key travels in plaintext (a determined player sniffing raw m
 | `swarm_cmd` | Pocket commands: `mine_at` (entry point) / `start` / `pause` / `resume` / `stop` / `update` |
 | `swarm_courier` | Pickup negotiation: `request` → `offer` → `assign` → `arrived` → `done` |
 | `swarm_fuel` | Fuel delivery: `request` → `offer` → `assign` → `arrived` → `delivered` |
-| `swarm_site` | Zone slot negotiation between miners at a dig site |
+| `swarm_site` | Zone slot negotiation between miners at a dig site; slots cap at `MAX_ZONES_PER_SITE`, beyond which miners auto-roll to the next site |
+| `swarm_zone` | Miner→server zone RPC (a `next` op atomically marks a zone done and requests the next) + the server's resume-layer (deepest-Y) grants back |
 | `swarm_lane` | Shared-shaft traffic: `using` / `waiting` heartbeats |
+| `swarm_hazard` | Hazard warnings: `lava_lake` / `spawner` / `cavern` with world pos — relayed to the dashboard map |
 
 ## GPS requirement
 
@@ -118,6 +143,10 @@ Drop in a new miner anytime (`wget` + `reboot`) — **no pocket interaction need
 
 On receiving a dig site, every miner announces itself on `swarm_site` for 3 seconds. Miners that already own a slot reply with it; the rest sort themselves by computer ID and take the free slots in order. Latecomers query the same way and pick the lowest free slot. Slots map deterministically to zone centers on a spiral **starting at ring 1** — nobody mines on top of the shared junction every tunnel radiates from.
 
+### Auto-expanding sites (the swarm never idles)
+
+A single shaft saturates at roughly 8–12 miners (the binding constraint is the exclusive shaft hold during courier/fueler meetups), so a site holds at most `MAX_ZONES_PER_SITE` zones (default 12). When a miner can't get a free slot at its site — because every zone is claimed or already mined — it **rolls to the next site on its own, with no coordinator**: every miner computes the same site grid deterministically (`site k = origin + chebyshev-spiral(k) × SITE_SPREAD`, with `SITE_SPREAD = 96` chosen to exceed the zone-grid extent so two sites can never overlap), flies there, negotiates a slot and keeps mining. Expansion stops at `MAX_SITES` (default 9); past that the miner goes home and the swarm reports idle (which fires the swarm-idle alert). The current site is persisted to `site.json` on every roll, so a crash mid-flight resumes to the right place. The dashboard renders all active sites at once.
+
 ### Service meetups
 
 Rooms have no open column above them, so couriers/fuelers meet the miner **at the shared shaft bottom** (open column to the sky): the miner climbs its zone's center column, retraces its tunnel, holds the lane exclusively while the courier descends the column, transfers, and walks back. During shaft descent and at home the meetup happens in place.
@@ -139,6 +168,15 @@ Defenses (lava is detected via `inspect` before every entry):
 - **Lava during descent** → sealed below, rooms start from that depth instead.
 - **Vein chase** → re-inspects after digging; flowed-in lava is sealed, branch skipped.
 - Water is harmless to turtles and is simply passed through.
+
+### Hazard warnings
+
+When a miner hits something notable it broadcasts a `swarm_hazard` so it shows on the dashboard map (this is **alert-only** — it does not change mining: spawners are still never dug, lava is still sealed):
+- **Lava lake** — broadcast when the shaft seals lava on the way down (once per Y level).
+- **Spawner** — when an inspect returns `minecraft:spawner` (the miner already refuses to dig it and returns home).
+- **Cavern** — when a room level is entirely open air (zero blocks mined in the empty-check window).
+
+Each is deduplicated within 5 blocks per type; the bridge relays them to the dashboard (red / orange / grey markers) and to Discord if a webhook is configured.
 
 ### Auto-refuel
 
@@ -191,6 +229,9 @@ Known gap: a crash in the middle of a vein chase or a service trip (short window
 | `LEVEL_STEP` | 3 | Blocks between stacked rooms (3 = contiguous, no floors; set 4 to leave a 1-block floor) |
 | `ROOM_SIZE` | 16 | Room is `ROOM_SIZE`×`ROOM_SIZE` → 16×16, tiling flush with adjacent zones (no gap) |
 | `ZONE_SPREAD` | 16 | Blocks between room centers below the shared shaft |
+| `MAX_ZONES_PER_SITE` | 12 | Zones per dig site before miners auto-roll to the next site |
+| `MAX_SITES` | 9 | Sites the swarm auto-expands to before going idle |
+| `SITE_SPREAD` | 96 | Blocks between site centers (> the zone-grid extent so sites never overlap) |
 | `VEIN_MAX_DEPTH` | 16 | Max vein recursion |
 | `CALL_COURIER_PCT` | 80 | Inventory % that triggers a courier |
 | `Utils.FILLER_RESERVE` | 4 | Filler stacks (deepslate/cobble) kept aboard for lava sealing |
