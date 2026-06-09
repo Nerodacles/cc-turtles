@@ -23,7 +23,7 @@ local MIN_Y            = -50  -- deepest room (top of the diamond band;
                               -- still above the always-lava aquifer -55..-63)
 local LEVEL_STEP       = 3    -- room height (3), contiguous: stacked
                               -- levels leave NO floor between them
-local ROOM_RINGS       = 5    -- room is (2*RINGS+1)^2 -> 11x11
+local ROOM_SIZE        = 16   -- room is ROOM_SIZE x ROOM_SIZE -> 16x16
 local ZONE_SPREAD      = 16   -- blocks between room centers below
 -- ALL miners enter AND exit through ONE shared 1x1 shaft at the
 -- site's exact x/z, splitting into their zones at the bottom.
@@ -854,12 +854,15 @@ end
 
 local function mineRoom()
     currentPhase = "mining"
-    local n = ROOM_RINGS
-    print("[room] Mining " .. (2 * n + 1) .. "x" .. (2 * n + 1) ..
+    print("[room] Mining " .. ROOM_SIZE .. "x" .. ROOM_SIZE ..
           " room at Y=" .. (state.topY - state.depth) .. "...")
 
     -- Level progress: steps already completed before a service trip
-    -- or crash get FAST-walked (move only), not re-mined
+    -- or crash get FAST-walked (move only), not re-mined.
+    -- idx counts EVERY step() call in order: arm-+z (7), arm--x (8),
+    -- then serpentine rows (row 1: 15 traversals; row 2+: 1 south +
+    -- 15 traversals each) — total 270. The fast-catchup replays the
+    -- EXACT same control-flow so it lands on the correct frontier cell.
     state.room.step = state.room.step or 0
     local target = state.room.step
     local idx = 0
@@ -893,25 +896,28 @@ local function mineRoom()
     clearVert(turtle.inspectUp, turtle.digUp, turtle.placeUp)
     clearVert(turtle.inspectDown, turtle.digDown, turtle.placeDown)
 
-    faceDir(0)
-    for _ = 1, n do
+    -- Positioning arm: walk to NW corner (px=-8, pz=+7)
+    faceDir(0)                            -- +z
+    for _ = 1, ROOM_SIZE / 2 - 1 do      -- 7 steps -> pz=+7
         waitWhilePaused()
         if abort() or not step() then backToCenter(); return reason end
     end
-    faceDir(3)
-    for _ = 1, n do
+    faceDir(3)                            -- -x
+    for _ = 1, ROOM_SIZE / 2 do          -- 8 steps -> px=-8
         waitWhilePaused()
         if abort() or not step() then backToCenter(); return reason end
     end
 
+    -- Serpentine sweep: 16 rows x 15 traversal steps each
     local goingEast = true
-    for row = 1, 2 * n + 1 do
+    for row = 1, ROOM_SIZE do
         if row > 1 then
-            faceDir(2)
+            faceDir(2)                    -- south (-z), one step per row
+            waitWhilePaused()
             if abort() or not step() then backToCenter(); return reason end
         end
         faceDir(goingEast and 1 or 3)
-        for _ = 1, 2 * n do
+        for _ = 1, ROOM_SIZE - 1 do      -- 15 steps
             waitWhilePaused()
             if abort() or not step() then backToCenter(); return reason end
         end

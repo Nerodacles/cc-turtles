@@ -33,7 +33,7 @@ type: project | feedback | reference
 ## What you own (this repo)
 
 - **`lib/`** — the shared substrate. `utils.lua` (movement, inventory, JSON persistence, ore/protected/fluid detection, FILLER_RESERVE), `nav.lua` (GPS orient/goTo, optional dig hooks), `lane.lua` (direction-grouped shared-shaft traffic, anti-starvation, TTL), `trail.lua` (absolute-direction move journal + reverse replay), `swarm.lua` (heartbeat + request/offer/assign negotiation), `fuel.lua` (burn/pull/ensure/deliver), `service.lua` (home/recovery/update/heartbeat plumbing), `updater.lua` (per-role manifest auto-update, parallel downloads), `version.lua` (single global version string).
-- **`miner/`** — `startup.lua` (boot + crash resume) and `main.lua` (the mining loop: shaft descent, zone split, stacked 11×11 rooms, vein chase, lava sealing, courier/fueler calls, return triggers).
+- **`miner/`** — `startup.lua` (boot + crash resume) and `main.lua` (the mining loop: shaft descent, zone split, stacked 16×16 rooms, vein chase, lava sealing, courier/fueler calls, return triggers).
 - **`courier/`, `fueler/`** — no-tool service turtles, terrain-hugging navigation, no-dig.
 - **`gps/`** — the 4-host GPS cluster + repeater.
 - **`pocket/remote.lua`** — in-game dashboard + command keys (m/s/p/r/h/u/k).
