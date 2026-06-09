@@ -37,18 +37,27 @@ button.primary { background: var(--accent); color: #08130a; border-color: var(--
 main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
 @media (max-width: 820px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; } }
 
-#mapWrap { position: relative; min-height: 0; background:
-  radial-gradient(circle at 30% 20%, #12171f, #0b0e13); }
+#mapWrap {
+  position: relative; min-height: 0;
+  background: radial-gradient(ellipse at 40% 35%, #12181f 0%, #0b0e13 70%);
+}
+/* vignette: dark edges to frame the world */
+#mapWrap::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 50%,
+    transparent 55%, rgba(8,11,16,0.55) 80%, rgba(6,8,12,0.85) 100%);
+  z-index: 2;
+}
 #map { width: 100%; height: 100%; display: block; }
 #maphint {
   position: absolute; left: 10px; bottom: 8px; color: var(--dim);
-  font-size: 11px; pointer-events: none; opacity: .7;
+  font-size: 11px; pointer-events: none; opacity: .7; z-index: 3;
 }
 #legend {
   position: absolute; right: 10px; top: 10px; display: flex;
   flex-direction: column; gap: 3px; font-size: 11px;
   background: #0d1117cc; border: 1px solid var(--line); border-radius: 6px;
-  padding: 7px 9px; pointer-events: none;
+  padding: 7px 9px; pointer-events: none; z-index: 3;
 }
 #legend .row { display: flex; align-items: center; gap: 6px; }
 #legend .sw { width: 9px; height: 9px; border-radius: 2px; }
@@ -56,6 +65,24 @@ main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; 
 #legend .c { color: var(--dim); margin-left: auto; }
 #legend .tot { color: var(--dim); border-top: 1px solid var(--line);
   margin-top: 3px; padding-top: 3px; }
+
+/* scale bar + compass overlay */
+#mapOverlay {
+  position: absolute; left: 10px; bottom: 28px;
+  display: flex; align-items: flex-end; gap: 10px;
+  pointer-events: none; z-index: 3;
+}
+#compass { opacity: 0.82; }
+#scalebar { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+#scalebarLine {
+  height: 4px; min-width: 40px; max-width: 120px;
+  border: 1px solid #8b97a7; border-top: none;
+  background: transparent;
+}
+#scalebarLabel {
+  font-size: 10px; color: var(--dim); font-family: ui-monospace, monospace;
+  text-shadow: 0 0 4px #0b0e13, 0 0 2px #0b0e13;
+}
 
 #list { overflow-y: auto; border-left: 1px solid var(--line); background: var(--panel); }
 .card {

@@ -31,6 +31,7 @@ function connect() {
     const m = JSON.parse(e.data);
     if (m.type === "snapshot") {
       turtles.clear();
+      trailBufs.clear();  // reset all trails on reconnect / full snapshot
       for (const t of m.turtles) turtles.set(t.id, { data: t.data, last: Date.now() - (t.age || 0) });
       if (m.lastKnown) lastKnown = m.lastKnown;
       meta = { latest: m.latest, server: m.server, bridge: m.bridge };
@@ -65,6 +66,8 @@ function connect() {
         z.prog ||= {};
         if (z.prog[d.slot] == null || d.level < z.prog[d.slot]) z.prog[d.slot] = d.level;
       }
+      // feed trail buffer with every new position
+      if (d.pos) trailPush(m.id, d.pos.x, d.pos.z);
       // keep local lastKnown in sync so we have a record if it goes offline
       { const rec = (lastKnown[m.id] ||= {});
         if (d.label) rec.label = d.label;
@@ -88,6 +91,7 @@ function connect() {
       if (ores.length > 4000) ores.splice(0, ores.length - 4000);
     } else if (m.type === "gone") {
       turtles.delete(m.id);
+      trailClear(m.id);  // discard trail when turtle goes offline
       // keep lastKnown — offline turtle shows its last position in the list
     }
     render();
@@ -347,6 +351,33 @@ function zonePos(siteKey, idx) {
   return { x: sx + gx * ZONE_SPREAD, z: sz + gz * ZONE_SPREAD };
 }
 
+// ---- client-side turtle trail buffer (ring buffer, no server traffic) ----
+// Keyed by turtle id (number). Stores last TRAIL_LEN {x,z} world positions.
+// Updated whenever a status message brings a new pos. Cleared when turtle goes
+// offline (gone message) or drops from turtles map during stale eviction.
+const TRAIL_LEN = 30;
+const trailBufs = new Map(); // id -> { buf: Array<{x,z}|null>, head: number, len: number }
+
+function trailPush(id, x, z) {
+  let t = trailBufs.get(id);
+  if (!t) { t = { buf: new Array(TRAIL_LEN).fill(null), head: 0, len: 0 }; trailBufs.set(id, t); }
+  // Only push if position actually changed to avoid bloating with stationary pings
+  const prev = t.buf[(t.head + TRAIL_LEN - 1) % TRAIL_LEN];
+  if (prev && prev.x === x && prev.z === z) return;
+  t.buf[t.head] = { x, z };
+  t.head = (t.head + 1) % TRAIL_LEN;
+  if (t.len < TRAIL_LEN) t.len++;
+}
+function trailClear(id) { trailBufs.delete(id); }
+// Prune trails for turtles that no longer exist in either live or lastKnown
+function trailPrune() {
+  for (const id of trailBufs.keys()) {
+    // lastKnown is an object (string keys); coerce explicitly so this
+    // survives a future refactor that keeps the Map key as a number.
+    if (!turtles.has(id) && !lastKnown[String(id)]) trailBufs.delete(id);
+  }
+}
+
 function fit() {
   // Size the backing store to the canvas's OWN CSS box (dpr-aware).
   // Called every render: a no-op when unchanged, but if the layout
@@ -355,7 +386,13 @@ function fit() {
   // strip at the bottom that accumulates draws as you pan.
   const w = Math.round(cv.clientWidth * devicePixelRatio);
   const h = Math.round(cv.clientHeight * devicePixelRatio);
-  if (w && h && (cv.width !== w || cv.height !== h)) { cv.width = w; cv.height = h; }
+  if (w && h && (cv.width !== w || cv.height !== h)) {
+    cv.width = w; cv.height = h;
+    // Resizing the backing store invalidates any CanvasPattern made from
+    // ctx (e.g. on a DPR change when the window moves between displays);
+    // drop the hatch cache so it is rebuilt against the fresh context.
+    _hatchCache = null;
+  }
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
 }
 window.addEventListener("resize", renderMap);
@@ -375,6 +412,45 @@ window.addEventListener("mousemove", (e) => {
   renderMap();
 });
 
+// Deterministic per-chunk brightness/hue tint from chunk coordinates.
+// Same chunk XZ → same value every frame; cheap bit-mix, no flicker.
+function chunkHash(cx, cz) {
+  let h = (cx * 374761393 + cz * 668265263) | 0;
+  h = ((h ^ (h >>> 13)) * 1274126177) | 0;
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 0xffffffff; // [0,1)
+}
+
+// Draw a subtle hatching pattern for partial/abandoned zones.
+// Drawn into an offscreen canvas that's reused (cached by cell size).
+let _hatchCache = null, _hatchSize = 0;
+function getHatchPattern(cellPx) {
+  const sz = Math.max(4, Math.round(cellPx));
+  if (_hatchCache && _hatchSize === sz) return _hatchCache;
+  const oc = document.createElement("canvas"); oc.width = sz; oc.height = sz;
+  const ox = oc.getContext("2d");
+  ox.clearRect(0, 0, sz, sz);
+  ox.strokeStyle = "rgba(139,151,167,0.25)"; ox.lineWidth = 0.8;
+  ox.beginPath(); ox.moveTo(0, sz); ox.lineTo(sz, 0); ox.stroke();
+  _hatchCache = ctx.createPattern(oc, "repeat");
+  _hatchSize = sz;
+  return _hatchCache;
+}
+
+// Update the HTML scale bar overlay to reflect the current view scale.
+function updateScaleBar(scale) {
+  const el = document.getElementById("scalebarLine");
+  const lb = document.getElementById("scalebarLabel");
+  if (!el || !lb) return;
+  // Pick a "nice" number of blocks whose pixel width fits 40-120px
+  const candidates = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+  let blocks = candidates[0];
+  for (const c of candidates) { if (c * scale <= 120) blocks = c; else break; }
+  const px = Math.round(blocks * scale);
+  el.style.width = px + "px";
+  lb.textContent = blocks >= 1000 ? (blocks / 1000) + "k blk" : blocks + " blk";
+}
+
 let autoCenter = true;
 function renderMap() {
   fit();  // keep the backing store matched to the display box every frame
@@ -390,18 +466,99 @@ function renderMap() {
   const cx = view.cx || 0, cz = view.cz || 0;
   const X = (x) => w / 2 + view.ox + (x - cx) * view.scale;
   const Y = (z) => h / 2 + view.oz + (z - cz) * view.scale;
+  // Inverse: screen → world
+  const Xw = (sx) => cx + (sx - w / 2 - view.ox) / view.scale;
+  const Yw = (sy) => cz + (sy - h / 2 - view.oz) / view.scale;
 
-  // grid
-  ctx.strokeStyle = "#1a212c"; ctx.lineWidth = 1;
-  const step = 16 * view.scale;
-  if (step > 6) {
-    for (let gx = (X(cx) % step + w) % step; gx < w; gx += step) line(gx, 0, gx, h);
-    for (let gy = (Y(cz) % step + h) % step; gy < h; gy += step) line(0, gy, w, gy);
+  function line(a, b, c2, d2) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d2); ctx.stroke(); }
+
+  // ---- 1. TERRAIN BACKGROUND: per-chunk tint -------------------------
+  // Only paint when zoom is not so far out that chunks are sub-pixel.
+  const step = 16 * view.scale; // pixels per chunk
+  if (step >= 3) {
+    // World coords of visible corners → chunk range to paint
+    const cx0 = Math.floor(Xw(0) / 16) - 1, cx1 = Math.floor(Xw(w) / 16) + 1;
+    const cz0 = Math.floor(Yw(0) / 16) - 1, cz1 = Math.floor(Yw(h) / 16) + 1;
+    for (let chx = cx0; chx <= cx1; chx++) {
+      for (let chz = cz0; chz <= cz1; chz++) {
+        const rv = chunkHash(chx, chz);
+        // Slight brightness variation: base dark ground colour ± tiny shift
+        // Range: ~#0f1318 to ~#14191f (very subtle, avoids mud)
+        const lum = Math.round(10 + rv * 6);          // 10-16
+        const hueShift = rv < 0.5 ? 0 : (rv < 0.75 ? 1 : -1); // tiny warm/cool flicker
+        const r = lum + hueShift, g = lum, b = lum + 4;
+        const sx = X(chx * 16), sy = Y(chz * 16);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        // +1 overlap to avoid hairline seams at chunk boundaries
+        ctx.fillRect(sx, sy, step + 1, step + 1);
+      }
+    }
+  } else {
+    // Too zoomed out for per-chunk tinting — single ground colour
+    ctx.fillStyle = "#0f1318";
+    ctx.fillRect(0, 0, w, h);
   }
 
-  // ZONES — every zone the server has on record (done / claimed / mined),
-  // drawn at its real spiral position so they persist on the map even when
-  // no turtle is live. Zones with a live miner = bright; old ones = faint.
+  // ---- 2. CHUNK GRID + COORDINATE LABELS -----------------------------
+  if (step > 6) {
+    // Determine label frequency: every chunk when zoomed in, every N chunks out
+    const labelEvery = step >= 60 ? 1 : step >= 20 ? 4 : step >= 8 ? 16 : 64;
+
+    // Regular grid lines
+    ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
+    for (let gx = (X(0) % step + w * 2) % step; gx < w + step; gx += step) {
+      const worldX = Math.round(Xw(gx) / 16) * 16;
+      const isAxisX = worldX === 0;
+      if (isAxisX) continue; // drawn separately below
+      ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
+      line(gx, 0, gx, h);
+    }
+    for (let gy = (Y(0) % step + h * 2) % step; gy < h + step; gy += step) {
+      const worldZ = Math.round(Yw(gy) / 16) * 16;
+      const isAxisZ = worldZ === 0;
+      if (isAxisZ) continue;
+      ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
+      line(0, gy, w, gy);
+    }
+
+    // Axis highlights (X=0 and Z=0 lines)
+    const axisX = X(0), axisZ = Y(0);
+    ctx.strokeStyle = "rgba(63,185,80,0.25)"; ctx.lineWidth = 1.5;
+    if (axisX >= 0 && axisX <= w) line(axisX, 0, axisX, h);
+    ctx.strokeStyle = "rgba(88,166,255,0.2)"; ctx.lineWidth = 1.5;
+    if (axisZ >= 0 && axisZ <= h) line(0, axisZ, w, axisZ);
+
+    // Coordinate labels on major grid lines
+    if (step * labelEvery >= 16) {
+      ctx.font = "9px ui-monospace, monospace";
+      ctx.textBaseline = "top";
+      // X labels along top edge
+      for (let gx = (X(0) % (step * labelEvery) + w * 4) % (step * labelEvery); gx < w; gx += step * labelEvery) {
+        const worldX = Math.round(Xw(gx) / 16 / labelEvery) * 16 * labelEvery;
+        if (gx < 2 || gx > w - 2) continue;
+        // halo
+        ctx.fillStyle = "rgba(11,14,19,0.75)";
+        ctx.fillRect(gx + 2, 2, 34, 12);
+        ctx.fillStyle = worldX === 0 ? "rgba(63,185,80,0.9)" : "rgba(139,151,167,0.7)";
+        ctx.fillText("X" + worldX, gx + 3, 3);
+      }
+      // Z labels along left edge
+      ctx.textBaseline = "middle";
+      for (let gy = (Y(0) % (step * labelEvery) + h * 4) % (step * labelEvery); gy < h; gy += step * labelEvery) {
+        const worldZ = Math.round(Yw(gy) / 16 / labelEvery) * 16 * labelEvery;
+        if (gy < 8 || gy > h - 8) continue;
+        ctx.fillStyle = "rgba(11,14,19,0.75)";
+        ctx.fillRect(2, gy - 6, 34, 12);
+        ctx.fillStyle = worldZ === 0 ? "rgba(88,166,255,0.9)" : "rgba(139,151,167,0.7)";
+        ctx.fillText("Z" + worldZ, 3, gy);
+      }
+      ctx.textBaseline = "alphabetic";
+    }
+  }
+
+  // ---- 3. ZONES -------------------------------------------------------
+  // Every zone the server has on record (done / claimed / mined), drawn at its
+  // real spiral position. States: live (active miner) / done / partial (prog only).
   const liveZone = new Set();   // "siteKey:idx" currently being mined
   for (const [, t] of turtles) {
     const d = t.data;
@@ -409,6 +566,12 @@ function renderMap() {
       liveZone.add(`${d.site.x},${d.site.y},${d.site.z}:${d.slot}`);
   }
   const half = (ZONE_SPREAD / 2 - 1) * view.scale;  // small gap between cells
+  const cellPx = half * 2;
+
+  // Animated pulse phase for live zones (cheap: uses Date.now, stable per frame)
+  const pulseT = (Date.now() % 2000) / 2000; // 0-1 cycling ~2s
+  const pulseMag = 0.5 + 0.5 * Math.sin(pulseT * Math.PI * 2); // 0-1
+
   for (const [sk, zr] of Object.entries(zonesData)) {
     if (!zr) continue;
     const idxs = new Set();
@@ -418,67 +581,206 @@ function renderMap() {
     for (const idx of idxs) {
       const p = zonePos(sk, idx);
       const zx = X(p.x) - half, zy = Y(p.z) - half;
-      if (zx < -half * 2 || zx > w || zy < -half * 2 || zy > h) continue;
+      if (zx + cellPx < 0 || zx > w || zy + cellPx < 0 || zy > h) continue;
+
       const live = liveZone.has(`${sk}:${idx}`);
       const done = !!(zr.done && zr.done[idx]);
-      // current = bright green; done (old) = faint green; touched but not
-      // done (abandoned/partial) = faint grey
-      const col = live ? "63,185,80" : done ? "63,185,80" : "139,151,167";
-      ctx.fillStyle   = `rgba(${col},${live ? 0.14 : 0.05})`;
-      ctx.strokeStyle = `rgba(${col},${live ? 0.85 : 0.22})`;
-      ctx.lineWidth = live ? 1.5 : 1;
-      ctx.fillRect(zx, zy, half * 2, half * 2);
-      ctx.strokeRect(zx, zy, half * 2, half * 2);
-      // label only when zoomed in enough to read it
-      if (view.scale >= 1.4) {
-        ctx.fillStyle = `rgba(${col},${live ? 0.9 : 0.4})`;
+      const partial = !done && !live && zr.prog && zr.prog[idx] != null;
+
+      if (live) {
+        // Bright dug-out fill + animated glow outline
+        ctx.fillStyle = "rgba(63,185,80,0.18)";
+        ctx.fillRect(zx, zy, cellPx, cellPx);
+        // Glow: soft outer shadow via compositing trick (shadowBlur on stroke)
+        const glowA = 0.55 + pulseMag * 0.35;
+        ctx.shadowColor = "rgba(63,185,80,0.6)";
+        ctx.shadowBlur = 8 + pulseMag * 6;
+        ctx.strokeStyle = `rgba(63,185,80,${glowA})`;
+        ctx.lineWidth = 1.8;
+        ctx.strokeRect(zx, zy, cellPx, cellPx);
+        ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
+      } else if (done) {
+        // Clean dug-out dark fill, subtle green outline
+        ctx.fillStyle = "rgba(30,50,35,0.55)";
+        ctx.fillRect(zx, zy, cellPx, cellPx);
+        ctx.strokeStyle = "rgba(63,185,80,0.28)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(zx, zy, cellPx, cellPx);
+      } else if (partial) {
+        // Hatched / abandoned
+        ctx.fillStyle = "rgba(20,24,32,0.45)";
+        ctx.fillRect(zx, zy, cellPx, cellPx);
+        if (cellPx >= 4) {
+          const pat = getHatchPattern(cellPx);
+          if (pat) {
+            ctx.save();
+            ctx.beginPath(); ctx.rect(zx, zy, cellPx, cellPx); ctx.clip();
+            ctx.fillStyle = pat;
+            ctx.fillRect(zx, zy, cellPx, cellPx);
+            ctx.restore();
+          }
+        }
+        ctx.strokeStyle = "rgba(139,151,167,0.3)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(zx, zy, cellPx, cellPx);
+      } else {
+        // claimed but no prog yet — faint placeholder
+        ctx.fillStyle = "rgba(139,151,167,0.04)";
+        ctx.fillRect(zx, zy, cellPx, cellPx);
+        ctx.strokeStyle = "rgba(139,151,167,0.18)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(zx, zy, cellPx, cellPx);
+      }
+
+      // Zone label when zoomed in enough
+      if (view.scale >= 1.4 && cellPx >= 14) {
+        const col = live ? "63,185,80" : done ? "63,185,80" : "139,151,167";
+        const alpha = live ? 0.95 : done ? 0.55 : 0.4;
         ctx.font = "9px ui-monospace, monospace";
+        ctx.textBaseline = "top";
         const tag = "z" + idx + (done ? " ✓" : "") +
           (zr.prog && zr.prog[idx] != null ? " Y" + zr.prog[idx] : "");
+        // halo behind text
+        ctx.fillStyle = "rgba(8,11,16,0.7)";
+        ctx.fillText(tag, zx + 2, zy + 10);
+        ctx.fillStyle = `rgba(${col},${alpha})`;
         ctx.fillText(tag, zx + 3, zy + 11);
+        ctx.textBaseline = "alphabetic";
       }
     }
   }
 
-  // discovered ores (under the turtles)
+  // ---- 4. ORES: soft radial glow dots --------------------------------
+  // Each ore is a radial-gradient circle that reads like a heatmap blob.
+  // createRadialGradient needs absolute screen coords, so we build per-dot.
+  // With the FIFO cap at 4000 and viewport culling this stays fast.
+  const oreR = Math.max(2.5, Math.min(7, view.scale * 1.4));
   for (const o of ores) {
     const ox = X(o.x), oy = Y(o.z);
-    if (ox < -4 || ox > w + 4 || oy < -4 || oy > h + 4) continue;
-    ctx.fillStyle = oreColor(o.n);
-    ctx.fillRect(ox - 1.5, oy - 1.5, 3, 3);
+    if (ox < -oreR * 2 || ox > w + oreR * 2 || oy < -oreR * 2 || oy > h + oreR * 2) continue;
+    const col = oreColor(o.n);
+    // Build a gradient centered at (ox, oy)
+    const g = ctx.createRadialGradient(ox, oy, 0, ox, oy, oreR * 2);
+    // Parse colour to rgba (oreColor returns hex strings like "#4ee6e6")
+    g.addColorStop(0,   hexToRgba(col, 0.92));
+    g.addColorStop(0.4, hexToRgba(col, 0.55));
+    g.addColorStop(1,   hexToRgba(col, 0));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(ox, oy, oreR * 2, 0, Math.PI * 2); ctx.fill();
   }
 
-  // offline turtles (lastKnown, not live) — dim markers so you can find them
-  ctx.globalAlpha = 0.28;
+  // ---- 5. OFFLINE TURTLES (lastKnown dagger markers) -----------------
+  ctx.font = "10px ui-monospace, monospace";
   for (const [sid, r] of Object.entries(lastKnown)) {
     if (turtles.has(+sid) || !r.pos) continue;
     const px = X(r.pos.x), py = Y(r.pos.z);
     if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
-    ctx.fillStyle = roleColor(r.role);
-    ctx.beginPath(); ctx.arc(px, py, 4, 0, 7); ctx.fill();
-    ctx.fillStyle = "#8b97a7"; ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText(`${esc(r.label || ("#" + sid))} †`, px + 7, py + 4);
+    const c = roleColor(r.role);
+    // Dim shadow under dot
+    ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 4;
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = c;
+    ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = "#8b97a7";
+    // Text halo
+    ctx.fillStyle = "rgba(8,11,16,0.7)";
+    ctx.fillText(`${r.label || ("#" + sid)} †`, px + 6, py + 5);
+    ctx.fillStyle = "rgba(139,151,167,0.6)";
+    ctx.fillText(`${r.label || ("#" + sid)} †`, px + 7, py + 4);
+    ctx.globalAlpha = 1;
   }
-  ctx.globalAlpha = 1;
 
-  // turtles
+  // ---- 6. TURTLE TRAILS (client-side ring buffer) --------------------
+  for (const [id, t] of pts) {
+    const trail = trailBufs.get(id);
+    if (!trail || trail.len < 2) continue;
+    const c = roleColor(t.data.role);
+    // Draw oldest→newest as a fading polyline
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    // Walk the ring buffer in chronological order
+    let prevPx = null, prevPy = null;
+    for (let i = 0; i < trail.len; i++) {
+      const bufIdx = (trail.head - trail.len + i + TRAIL_LEN) % TRAIL_LEN;
+      const pt = trail.buf[bufIdx];
+      if (!pt) continue;
+      const px = X(pt.x), py = Y(pt.z);
+      if (prevPx != null) {
+        const alpha = (i / trail.len) * 0.45; // fades from near-zero at tail to 0.45 at head
+        ctx.strokeStyle = hexToRgba(c, alpha);
+        ctx.beginPath(); ctx.moveTo(prevPx, prevPy); ctx.lineTo(px, py); ctx.stroke();
+      }
+      prevPx = px; prevPy = py;
+    }
+  }
+
+  // ---- 7. LIVE TURTLES -----------------------------------------------
   const now = Date.now();
   for (const [id, t] of pts) {
     const d = t.data, p = d.pos;
     const px = X(p.x), py = Y(p.z);
     const stale = now - t.last > STALE_MS;
     const c = roleColor(d.role);
-    // (zone rectangles are drawn as a persistent layer above, from the
-    // server's zone records — no longer per-live-turtle here)
+
     ctx.globalAlpha = stale ? 0.4 : 1;
+
+    // Soft shadow behind the dot
+    ctx.shadowColor = "rgba(0,0,0,0.7)";
+    ctx.shadowBlur = 6;
     ctx.fillStyle = c;
-    ctx.beginPath(); ctx.arc(px, py, 5, 0, 7); ctx.fill();
-    ctx.fillStyle = "#0b0e13"; ctx.beginPath(); ctx.arc(px, py, 2, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
+
+    // Dark inner pupil
+    ctx.fillStyle = "#080b10";
+    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+
     ctx.globalAlpha = 1;
-    ctx.fillStyle = "#aeb9c7"; ctx.font = "11px ui-monospace, monospace";
-    ctx.fillText(`${d.label || ("#" + id)} y${p.y}`, px + 8, py + 4);
+
+    // Label with text halo for legibility
+    const label = `${d.label || ("#" + id)} y${p.y}`;
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(8,11,16,0.8)";
+    ctx.fillText(label, px + 9, py + 1);
+    ctx.fillStyle = stale ? "#6b7686" : "#c8d3df";
+    ctx.fillText(label, px + 8, py);
+    ctx.textBaseline = "alphabetic";
   }
-  function line(a, b, c2, d2) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d2); ctx.stroke(); }
+
+  // ---- 8. ORIGIN MARKER (0,0) ----------------------------------------
+  const ox0 = X(0), oz0 = Y(0);
+  if (ox0 > -10 && ox0 < w + 10 && oz0 > -10 && oz0 < h + 10) {
+    ctx.globalAlpha = 0.7;
+    // Cross hairs
+    ctx.strokeStyle = "#3fb950"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ox0 - 5, oz0); ctx.lineTo(ox0 + 5, oz0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox0, oz0 - 5); ctx.lineTo(ox0, oz0 + 5); ctx.stroke();
+    // Small ring
+    ctx.strokeStyle = "#3fb950"; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.arc(ox0, oz0, 4, 0, Math.PI * 2); ctx.stroke();
+    // Label
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = "rgba(8,11,16,0.7)"; ctx.fillText("0,0", ox0 + 6, oz0 + 2);
+    ctx.fillStyle = "rgba(63,185,80,0.8)"; ctx.fillText("0,0", ox0 + 7, oz0 + 3);
+    ctx.textBaseline = "alphabetic";
+    ctx.globalAlpha = 1;
+  }
+
+  // Update HTML overlay (scale bar)
+  updateScaleBar(view.scale);
+}
+
+// Hex colour (#rrggbb or #rgb) -> "rgba(r,g,b,a)"
+function hexToRgba(hex, a) {
+  let h = hex.replace("#", "");
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+  return `rgba(${r},${g},${b},${a})`;
 }
 
 function renderLegend() {
@@ -494,7 +796,7 @@ function renderLegend() {
     `<div class="row tot"><span class="n">found</span><span class="c">${ores.length}</span></div>`;
 }
 
-function render() { renderList(); renderMap(); renderLegend(); refreshUpdateBtn(); }
+function render() { trailPrune(); renderList(); renderMap(); renderLegend(); refreshUpdateBtn(); }
 
 fit(); lockUI(); connect();
 setInterval(render, 1000); // refresh stale fades + ages
