@@ -645,6 +645,12 @@ wss.on("connection", (ws) => {
       // Heartbeat-driven wake edge: if the world was asleep and this heartbeat woke it.
       if (wasSleepingBeforeHb) onWakeEdge();
 
+      // SECURITY: strip the swarm shared secret out of the heartbeat before it
+      // is ever stored, broadcast to browsers, or exposed via /api/*. The k is
+      // only used to authenticate rednet on the in-game side; it must never
+      // reach a web client (same reason ores/log are pulled out below).
+      delete msg.data.k;
+
       // pull discovered ores out of the heartbeat into the shared map
       const newOres = Array.isArray(msg.data.ores) ? msg.data.ores : null;
       if (newOres) {
