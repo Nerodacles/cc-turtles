@@ -37,7 +37,14 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
 const WEBHOOK_STALE_MS = parseInt(process.env.WEBHOOK_STALE_MS || "600000", 10);
 const WEBHOOK_FUEL_THRESHOLD = parseInt(process.env.WEBHOOK_FUEL_THRESHOLD || "500", 10);
 const STUCK_MS = parseInt(process.env.STUCK_MS || "480000", 10);
-// Warm-up grace: suppress offline/stuck/swarm-idle alerts for 90s after process start.
+// WORLD_SLEEP_MS: if no heartbeat from any turtle for this long (AND/OR bridge
+// disconnected), the world is "asleep" — all Discord alerts are suppressed.
+// Default 180s (< the 600s offline + 480s stuck thresholds, so sleep is detected
+// before those would fire). NaN-guarded and floored at 1000ms.
+const _wsmRaw = parseInt(process.env.WORLD_SLEEP_MS || "180000", 10);
+const WORLD_SLEEP_MS = Number.isNaN(_wsmRaw) || _wsmRaw < 1000 ? 180000 : _wsmRaw;
+// Warm-up grace: suppress offline/stuck/swarm-idle alerts for 90s after process start
+// AND for 90s after the world wakes from sleep.
 const startTs = Date.now();
 const WARMUP_GRACE_MS = 90000;
 // Per-turtle webhook state. Never log or broadcast these.
@@ -50,6 +57,51 @@ const WARMUP_GRACE_MS = 90000;
 const webhookState = new Map();
 // id -> { alerted:bool, fuelAlerted:bool, stranded:bool, lastFuel:number|null,
 //         stuckAlerted:bool, stuckPos:{x,z,level,ts}|null }
+
+// ---- WORLD-SLEEP TRACKING -------------------------------------------
+// bridgeConnected: true while ≥1 bridge WS client is connected.
+// lastHeartbeatTs: timestamp of the most recent status heartbeat from any turtle.
+//   Starts at Date.now() so the warm-up grace applies; updated on every heartbeat.
+// lastWakeTs: set to Date.now() on each asleep→awake edge so the wake grace window
+//   uses the same inGrace formula already used for the boot grace.
+// worldAsleep(): returns true when no bridge is connected OR the whole fleet has been
+//   silent for WORLD_SLEEP_MS.  A single offline turtle while others heartbeat is NOT
+//   asleep — lastHeartbeatTs tracks the MAX over all turtles, so one active turtle
+//   keeps the swarm "awake" and the offline turtle's alert still fires normally.
+let bridgeConnected = false;
+let lastHeartbeatTs = Date.now();
+let lastWakeTs = 0; // 0 = no wake edge yet; set on first bridge connect too
+function worldAsleep() {
+  return !bridgeConnected || (Date.now() - lastHeartbeatTs > WORLD_SLEEP_MS);
+}
+
+// onWakeEdge: called when the world transitions from asleep to awake.
+// (a) Sets lastWakeTs so the periodic inGrace check gives a fresh 90s window.
+// (b) Re-arms all per-turtle alert flags and swarm-level flags so no backlog
+//     storm fires immediately — a turtle that is STILL broken after the 90s
+//     grace will then alert correctly on the next periodic pass.
+function onWakeEdge() {
+  lastWakeTs = Date.now();
+  console.log("[sleep] world woke — grace window started, alert flags re-armed");
+  // Re-arm per-turtle flags: clear alerted/fuelAlerted/stranded/stuckAlerted.
+  // Also null stuckPos so the stuck clock gets a fresh baseline on the first
+  // post-wake heartbeat — without this, a sleep longer than STUCK_MS would
+  // leave stuckPos.ts in the past and false-fire "stuck" after the grace expires
+  // for a turtle that was mining normally before the player logged off.
+  for (const [, s] of webhookState) {
+    s.alerted = false;
+    s.fuelAlerted = false;
+    s.stranded = false;
+    s.stuckAlerted = false;
+    s.stuckPos = null;
+  }
+  // Re-arm swarm-level flags.
+  swarmIdleAlerted = false;
+  // siteFinishedAlerted is intentionally NOT cleared here — a site that finished
+  // during the live session before sleep should not re-alert on every wake.
+  // Broadcast the awake state to browsers.
+  broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer, asleep: false });
+}
 
 // Rare-ore dedup: posKey -> ts; fires for diamond, ancient_debris, emerald.
 const RARE_ORES = new Set(["diamond", "ancient_debris", "emerald"]);
@@ -74,8 +126,12 @@ function wState(id) {
 }
 
 // sendWebhook: POST { content: text } to WEBHOOK_URL. Never throws, never logs the URL.
+// Belt-and-suspenders: also silences while world is asleep. The real suppression is
+// at the decision level (guards below), but this ensures nothing leaks through
+// a future callsite that forgets to check worldAsleep() first.
 function sendWebhook(text) {
   if (!WEBHOOK_URL) return;
+  if (worldAsleep()) return;
   try {
     const body = JSON.stringify({ content: text });
     const url = new URL(WEBHOOK_URL);
@@ -207,7 +263,7 @@ async function pollVersion() {
       console.log(`[version] latest ${LATEST} -> ${remote}`);
       LATEST = remote;
       // Push the new version to all open browser tabs — no page reload needed.
-      broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer });
+      broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer, asleep: worldAsleep() });
     }
   } catch (err) {
     // Network error, timeout, parse failure: keep existing LATEST, try again next interval.
@@ -357,8 +413,10 @@ function touchClaim(site, miner, idx, level) { // renew from heartbeat
 
 // F5: site finished — fire when all known spiral indices (0..maxIdx) are done
 // and there are no live claims remaining.
+// SLEEP GATE: skip (and don't set the alerted flag) while the world is asleep.
 function checkSiteFinished(sk) {
   if (!WEBHOOK_URL) return;
+  if (worldAsleep()) return; // don't set siteFinishedAlerted while asleep
   if (siteFinishedAlerted.has(sk)) return;
   const zr = zones[sk];
   if (!zr) return;
@@ -555,6 +613,14 @@ wss.on("connection", (ws) => {
       if (ws.role === "bridge") {
         bridges.add(ws);
         if (msg.ver) bridgeVer = msg.ver;
+        // Wake-edge: if we were asleep and a bridge just connected, start the
+        // wake grace window and re-arm all per-turtle/swarm alert flags so
+        // the sleep gap doesn't create a backlog storm.
+        if (!bridgeConnected) {
+          bridgeConnected = true;
+          const wasAsleep = Date.now() - lastHeartbeatTs > WORLD_SLEEP_MS;
+          if (wasAsleep) onWakeEdge();
+        }
       } else {
         browsers.add(ws);
         // send the full current snapshot to the new tab (includes stats for F4)
@@ -564,12 +630,21 @@ wss.on("connection", (ws) => {
         send(ws, { type: "snapshot", turtles: snap, ores, needKey: !!CMD_KEY,
                    zones, lastKnown, latest: LATEST, server: LATEST, bridge: bridgeVer,
                    stats: { session: stats.session, totals: stats.totals, history: stats.history },
-                   hazards });
+                   hazards, asleep: worldAsleep() });
       }
       return;
     }
 
     if (ws.role === "bridge" && msg.type === "status" && msg.id != null) {
+      // WORLD-SLEEP: update the global last-heartbeat timestamp.
+      // This is the MAX over all turtles — one active turtle keeps the swarm awake,
+      // so a single offline turtle with other turtles still heartbeating is NOT asleep.
+      const nowHb = Date.now();
+      const wasSleepingBeforeHb = worldAsleep(); // capture BEFORE updating lastHeartbeatTs
+      lastHeartbeatTs = nowHb;
+      // Heartbeat-driven wake edge: if the world was asleep and this heartbeat woke it.
+      if (wasSleepingBeforeHb) onWakeEdge();
+
       // pull discovered ores out of the heartbeat into the shared map
       const newOres = Array.isArray(msg.data.ores) ? msg.data.ores : null;
       if (newOres) {
@@ -582,7 +657,8 @@ wss.on("connection", (ws) => {
           broadcastStats();
           saveStats();
           // F5: rare-ore alert (diamond / ancient_debris / emerald) — dedup by position ~3 blocks per 60s
-          if (WEBHOOK_URL && RARE_ORES.has(o.n)) {
+          // SLEEP GATE: skip alert evaluation (and flag-setting) while world is asleep.
+          if (WEBHOOK_URL && RARE_ORES.has(o.n) && !worldAsleep()) {
             const rk = rareDedupKey(o.x, o.y, o.z) + ":" + o.n; // per-ore dedup key
             const last = rareSeen.get(rk) || 0;
             const now2 = Date.now();
@@ -608,8 +684,8 @@ wss.on("connection", (ws) => {
       if (msg.data.role === "miner" && msg.data.site && msg.data.zoneIdx != null)
         touchClaim(msg.data.site, msg.id, msg.data.zoneIdx, msg.data.level);
       // F4: update last miner heartbeat ts for session-idle tracking
-      if (msg.data.role === "miner") lastMinerTs = Date.now();
-      turtles.set(msg.id, { data: msg.data, last: Date.now() });
+      if (msg.data.role === "miner") lastMinerTs = nowHb;
+      turtles.set(msg.id, { data: msg.data, last: nowHb });
       // persist last known label/pos/level so a restart doesn't lose
       // where a turtle was (e.g. to locate a lost/silent turtle)
       { const d = msg.data, rec = (lastKnown[msg.id] ||= {});
@@ -619,10 +695,12 @@ wss.on("connection", (ws) => {
         if (d.site)  rec.site  = d.site;
         if (d.zoneIdx != null) rec.zoneIdx = d.zoneIdx;
         if (d.role)  rec.role  = d.role;
-        rec.ts = Date.now();
+        rec.ts = nowHb;
         saveTurtles(); }
       // F5: fuel alerts (stranded @ 0 pre-empts fuel-critical)
-      if (WEBHOOK_URL && msg.data.fuel != null && typeof msg.data.fuel === "number") {
+      // SLEEP GATE: while asleep, skip decision-level evaluation so no flags are
+      // falsely set (which would suppress real alerts after wake).
+      if (WEBHOOK_URL && msg.data.fuel != null && typeof msg.data.fuel === "number" && !worldAsleep()) {
         const ws2 = wState(msg.id);
         const fuel = msg.data.fuel;
         const label = msg.data.label || ("#" + msg.id);
@@ -649,7 +727,8 @@ wss.on("connection", (ws) => {
         }
         ws2.lastFuel = fuel;
       }
-      // Re-arm offline alert when turtle comes back online
+      // Re-arm offline alert when turtle comes back online (always — not gated by sleep,
+      // since this is a re-arm, not a fire, and must happen regardless of sleep state).
       wState(msg.id).alerted = false;
       // F5: stuck-miner position tracking — update baseline when pos/level/phase changes
       if (WEBHOOK_URL && msg.data.role === "miner") {
@@ -668,14 +747,16 @@ wss.on("connection", (ws) => {
           ws3.stuckPos = null;
         } else if (moved) {
           // Still mining, but moved (or first heartbeat in mining) — re-arm and set baseline
-          ws3.stuckAlerted = false;
-          ws3.stuckPos = { x: cx, z: cz, level: clevel, ts: Date.now() };
+          // SLEEP GATE: don't set stuckAlerted=false while asleep; stuckPos update is safe
+          // (preserving baseline), but the re-arm is handled by onWakeEdge() instead.
+          if (!worldAsleep()) ws3.stuckAlerted = false;
+          ws3.stuckPos = { x: cx, z: cz, level: clevel, ts: nowHb };
         }
         // else: phase=mining, position unchanged — baseline holds, stuck clock keeps running
         // Swarm-idle tracking: mark that at least one miner has been mining since boot
         if (inMiningPhase) {
           swarmEverMined = true;
-          // If idle alert was armed, re-arm it now that mining resumed
+          // If idle alert was armed, re-arm it now that mining resumed (always safe — re-arm only)
           if (swarmIdleAlerted) swarmIdleAlerted = false;
         }
       }
@@ -710,7 +791,8 @@ wss.on("connection", (ws) => {
       if (hazards.length > HAZARD_CAP) hazards.shift();
       broadcast(browsers, { type: "hazards", hazards: [h] });
       // Discord alert — dedup by type + 8-block XZ snap, 60s window
-      if (WEBHOOK_URL && d.pos) {
+      // SLEEP GATE: skip evaluation (and flag-setting) while world is asleep.
+      if (WEBHOOK_URL && d.pos && !worldAsleep()) {
         const dk = hazardDedupKey(d.hazard, d.pos.x, d.pos.z);
         const lastSeen = hazardSeen.get(dk) || 0;
         const now = Date.now();
@@ -758,14 +840,33 @@ wss.on("connection", (ws) => {
     }
   });
 
-  ws.on("close", () => { browsers.delete(ws); bridges.delete(ws); });
-  ws.on("error", () => { browsers.delete(ws); bridges.delete(ws); });
+  ws.on("close", () => {
+    browsers.delete(ws);
+    bridges.delete(ws);
+    // Update bridgeConnected: false only when the last bridge disconnects.
+    if (ws.role === "bridge" && bridges.size === 0) {
+      bridgeConnected = false;
+      // No wake-edge on disconnect — the world is going to sleep, not waking.
+      // The asleep state will be detected by worldAsleep() on the next alert check.
+      broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer, asleep: true });
+    }
+  });
+  ws.on("error", () => {
+    browsers.delete(ws);
+    bridges.delete(ws);
+    if (ws.role === "bridge" && bridges.size === 0) {
+      bridgeConnected = false;
+      broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer, asleep: true });
+    }
+  });
 });
 
 // ---- prune stale turtles + tell browsers + F5 offline/stuck/swarm-idle alerts -------
 setInterval(() => {
   const now = Date.now();
-  const inGrace = now - startTs < WARMUP_GRACE_MS;
+  // inGrace is true for 90s after process boot OR after a world-wake edge.
+  // lastWakeTs=0 means "no wake yet"; Math.max(startTs, 0) = startTs, correct.
+  const inGrace = now - Math.max(startTs, lastWakeTs) < WARMUP_GRACE_MS;
   // 1. Evict turtles that haven't heartbeated within STALE_MS.
   for (const [id, t] of turtles) {
     if (now - t.last > STALE_MS) {
@@ -774,7 +875,10 @@ setInterval(() => {
     }
   }
 
-  if (WEBHOOK_URL && !inGrace) {
+  // SLEEP GATE (periodic): while the world is asleep, skip ALL alert evaluation.
+  // Do NOT set any alerted/stuckAlerted/swarmIdleAlerted flags during sleep —
+  // those would suppress real alerts after wake.
+  if (WEBHOOK_URL && !inGrace && !worldAsleep()) {
     // 2. F5: Offline alerts — scanned from lastKnown so the WEBHOOK_STALE_MS
     //    threshold is independent of STALE_MS (which is usually much shorter).
     //    Fires once per offline event; re-armed when the turtle sends a heartbeat.

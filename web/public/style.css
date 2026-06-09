@@ -33,6 +33,7 @@ button.primary { background: var(--accent); color: #08130a; border-color: var(--
 }
 .pill.on { color: var(--accent); border-color: var(--accent); }
 .pill.off { color: var(--bad); border-color: var(--bad); }
+.pill.sleep { color: var(--warn); border-color: var(--warn); }
 
 main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
 @media (max-width: 820px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr auto; } }

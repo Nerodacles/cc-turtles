@@ -18,6 +18,10 @@ let statsData = null; // { session:{start,ores}, totals, history }
 const HAZARD_CLIENT_CAP = 200;
 let hazardsData = []; // populated from snapshot + hazards delta messages
 
+// WORLD-SLEEP: reflects server's worldAsleep() state — true while bridge is
+// disconnected or the full fleet has been silent for WORLD_SLEEP_MS.
+let worldAsleep = false;
+
 // ore name -> color (drops the minecraft:/_ore already)
 const ORE_COLOR = {
   diamond: "#4ee6e6", emerald: "#3fe06b", ancient_debris: "#a8682f",
@@ -50,10 +54,13 @@ function connect() {
       if (m.stats && m.stats.session && m.stats.totals) statsData = m.stats;
       // F3: load hazards from snapshot (absent in older server versions — tolerate gracefully)
       hazardsData = Array.isArray(m.hazards) ? m.hazards.slice(-HAZARD_CLIENT_CAP) : [];
+      // World-sleep state from server (absent in older servers — tolerate gracefully)
+      if (m.asleep != null) worldAsleep = !!m.asleep;
       lockUI();
       renderMeta();
       renderZones();
       renderStats();
+      renderSleep();
     } else if (m.type === "zones") {
       if (m.site === "*" || m.z === null) {
         if (m.site === "*") zonesData = {}; else delete zonesData[m.site];
@@ -122,7 +129,9 @@ function connect() {
       if (m.latest != null) meta.latest = m.latest;
       if (m.server != null) meta.server = m.server;
       if (m.bridge !== undefined) meta.bridge = m.bridge;
+      if (m.asleep != null) worldAsleep = !!m.asleep;
       renderMeta();
+      renderSleep();
       refreshUpdateBtn();
       return; // no full render needed
     }
@@ -140,6 +149,12 @@ function renderMeta() {
   const bad = meta.bridge && meta.bridge !== meta.latest;
   v.innerHTML = `latest <b>${esc(meta.latest)}</b>` +
     (meta.bridge ? ` · bridge <span class="${bad ? "vbad" : ""}">${esc(meta.bridge)}</span>` : "");
+}
+function renderSleep() {
+  const el = document.getElementById("sleep");
+  if (!el) return;
+  el.hidden = !worldAsleep;
+  el.className = "pill" + (worldAsleep ? " sleep" : "");
 }
 function renderZones() {
   const el = document.getElementById("zones");
