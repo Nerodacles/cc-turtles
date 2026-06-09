@@ -10,6 +10,12 @@ metadata:
   namespace: devops
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): the data PVC is RWO, so the old pod must
+  # release the volume BEFORE the new one mounts it. A rolling surge would
+  # start the new pod first and deadlock on a Multi-Attach error whenever
+  # it lands on a different node than the old pod.
+  strategy:
+    type: Recreate
   selector:
     matchLabels: { app: cc-turtles-dashboard }
   template:
@@ -23,6 +29,28 @@ spec:
           env:
             - { name: PORT, value: "8080" }
             - { name: STALE_MS, value: "20000" }
+            # Command gate: browsers must enter this key to issue
+            # commands. Sourced from a Secret (not in git) - create it:
+            #   kubectl -n devops create secret generic cc-turtles-cmdkey \
+            #     --from-literal=key=YOUR-KEY
+            # Absent secret = no gate (optional: true).
+            - name: CMD_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cc-turtles-cmdkey
+                  key: key
+                  optional: true
+            # Read-only API gate: GET /api/state requires this token as
+            # Bearer or ?key=. Sourced from a Secret (not in git) - create it:
+            #   kubectl -n devops create secret generic cc-turtles-readkey \
+            #     --from-literal=key=YOUR-READ-KEY
+            # Absent secret = read API treated as disabled (optional: true).
+            - name: READ_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cc-turtles-readkey
+                  key: key
+                  optional: true
           readinessProbe:
             tcpSocket: { port: 8080 }
             initialDelaySeconds: 3

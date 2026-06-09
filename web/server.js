@@ -14,6 +14,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -22,6 +23,9 @@ const PUBLIC = path.join(__dirname, "public");
 // Command key: browsers must send this to issue commands. Empty = no
 // gate (anyone can command). Set CMD_KEY on the deployment.
 const CMD_KEY = process.env.CMD_KEY || "";
+// Read-only API key. Absent/empty => read API is DISABLED (503).
+// Set READ_KEY in the deployment Secret (cc-turtles-readkey).
+const READ_KEY = process.env.READ_KEY || "";
 
 // ---- LATEST version: read the single global lib/version.lua ---------
 // (the no-build pod clones the repo, so this file is right here)
@@ -165,20 +169,74 @@ const MIME = {
   ".ico": "image/x-icon",
 };
 
+// ---- read-only API auth helper --------------------------------------
+// Returns true if the request carries a valid READ_KEY.
+// Accepts: Authorization: Bearer <token>  OR  ?key=<token>
+// Uses crypto.timingSafeEqual to prevent timing oracle attacks.
+function checkReadKey(req) {
+  if (!READ_KEY) return false; // disabled when key not configured
+  const expected = Buffer.from(READ_KEY, "utf8");
+  function safeCompare(supplied) {
+    if (!supplied) return false;
+    const s = Buffer.from(supplied, "utf8");
+    if (s.length !== expected.length) return false;
+    return crypto.timingSafeEqual(s, expected);
+  }
+  const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+  if (safeCompare(q.get("key"))) return true;
+  const auth = req.headers["authorization"] || "";
+  if (auth.startsWith("Bearer ") && safeCompare(auth.slice(7))) return true;
+  return false;
+}
+// Build the full turtle list used by /api/state and /api/turtles
+function turtleList() {
+  const now = Date.now();
+  const out = [];
+  for (const [id, t] of turtles) out.push({ id, ...t.data, age: now - t.last });
+  return out;
+}
+
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
-  // debug: current state (is the bridge forwarding turtle status?).
+
+  // GET /api/health — unauthenticated; for liveness probes.
+  if (urlPath === "/api/health") {
+    if (req.method !== "GET") { res.writeHead(405); return res.end("method not allowed"); }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true, version: LATEST }));
+  }
+
+  // GET /api/state — full state snapshot; requires READ_KEY.
   // NOTE: zone reset is intentionally NOT an HTTP endpoint - it is a
   // key-gated WebSocket command (reset_zones) so it can't be triggered
   // unauthenticated.
   if (urlPath === "/api/state") {
-    const now = Date.now();
-    const out = { latest: LATEST, server: LATEST, bridge: bridgeVer,
-                  bridges: bridges.size, browsers: browsers.size, turtles: [], lastKnown };
-    for (const [id, t] of turtles) out.turtles.push({ id, label: t.data.label, role: t.data.role, age: now - t.last });
+    if (req.method !== "GET") { res.writeHead(405); return res.end("method not allowed"); }
+    if (!READ_KEY) { res.writeHead(503); return res.end("read API disabled"); }
+    if (!checkReadKey(req)) { res.writeHead(401); return res.end("unauthorized"); }
+    const out = {
+      version: LATEST,
+      turtles: turtleList(),
+      ores,
+      zones,
+      bridge: bridgeVer,
+      bridges: bridges.size,
+      browsers: browsers.size,
+      lastKnown,
+    };
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(out, null, 2));
   }
+
+  // GET /api/turtles — turtle list only; requires READ_KEY.
+  if (urlPath === "/api/turtles") {
+    if (req.method !== "GET") { res.writeHead(405); return res.end("method not allowed"); }
+    if (!READ_KEY) { res.writeHead(503); return res.end("read API disabled"); }
+    if (!checkReadKey(req)) { res.writeHead(401); return res.end("unauthorized"); }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(turtleList(), null, 2));
+  }
+
   // Persisted logs. Key-gated (same CMD_KEY as the live log watch).
   //   /api/logs            -> JSON list of available day-files + sizes
   //   /api/logs?day=DATE   -> the raw text of that day's log

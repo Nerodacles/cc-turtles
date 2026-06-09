@@ -62,6 +62,17 @@ spec:
                   name: cc-turtles-cmdkey
                   key: key
                   optional: true
+            # Read-only API gate: GET /api/state requires this token as
+            # Bearer or ?key=. Sourced from a Secret (not in git) - create it:
+            #   kubectl -n devops create secret generic cc-turtles-readkey \
+            #     --from-literal=key=YOUR-READ-KEY
+            # Absent secret = read API treated as disabled (optional: true).
+            - name: READ_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cc-turtles-readkey
+                  key: key
+                  optional: true
           ports: [{ containerPort: 8080 }]
           readinessProbe:
             tcpSocket: { port: 8080 }
