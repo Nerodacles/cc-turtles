@@ -454,7 +454,17 @@ window.addEventListener("resize", renderMap);
 cv.addEventListener("wheel", (e) => {
   e.preventDefault();
   const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-  view.scale = Math.max(0.2, Math.min(20, view.scale * f));
+  const newScale = Math.max(0.2, Math.min(20, view.scale * f));
+  // Zoom toward the cursor: keep the world point under the mouse fixed on
+  // screen. Screen proj is w/2 + ox + (x-cx)*scale, so re-anchor ox/oz around
+  // the mouse offset from center (u,v) by the scale ratio.
+  const rect = cv.getBoundingClientRect();
+  const u = (e.clientX - rect.left) - cv.clientWidth / 2;
+  const v = (e.clientY - rect.top) - cv.clientHeight / 2;
+  const ratio = newScale / view.scale;
+  view.ox = u - (u - view.ox) * ratio;
+  view.oz = v - (v - view.oz) * ratio;
+  view.scale = newScale;
   renderMap();
 }, { passive: false });
 cv.addEventListener("mousedown", (e) => view.drag = { x: e.clientX, y: e.clientY, ox: view.ox, oz: view.oz });
