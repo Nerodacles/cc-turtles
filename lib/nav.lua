@@ -170,41 +170,51 @@ end
 -- One horizontal flight step that prefers NOT digging: if a block is
 -- ahead, hop OVER it (climb 1) instead of tunneling through. Ends only
 -- as high as the tallest obstacle on the way.
+-- Returns the number of upward hops taken (so goTo can dead-reckon the
+-- final descent without a second GPS locate).
 local function hopStep()
+    local hops = 0
     local tries = 0
     while not turtle.forward() do
         if turtle.detect() or lavaAt("fwd") then
             -- solid obstacle OR lava ahead (detect() is false on lava):
             -- hop OVER it rather than digging/entering
             Nav.up()
+            hops = hops + 1
         else
             tries = tries + 1
             stuckTick("fwd", tries, "hop")
         end
     end
     if Nav.facing then Trail.record(tostring(Nav.facing)) end
+    return hops
 end
 
 -- Terrain-hugging navigation: fly straight at the target's height,
 -- hopping over obstacles as needed (no fixed cruise altitude), then
 -- descend onto the target through its air column.
+-- Dead-reckons final altitude from hop count: eliminates the second
+-- GPS locate that was only needed to measure accumulated hop altitude.
 function Nav.goTo(t)
     local cur = Nav.locate()
+    local extraY = 0  -- net upward displacement from obstacle hops
 
     -- climb only if the target is higher than we are
     for _ = 1, math.max(0, t.y - cur.y) do Nav.up() end
 
     local dx = t.x - cur.x
     if dx > 0 then Nav.face(1) elseif dx < 0 then Nav.face(3) end
-    for _ = 1, math.abs(dx) do hopStep() end
+    for _ = 1, math.abs(dx) do extraY = extraY + hopStep() end
 
     local dz = t.z - cur.z
     if dz > 0 then Nav.face(0) elseif dz < 0 then Nav.face(2) end
-    for _ = 1, math.abs(dz) do hopStep() end
+    for _ = 1, math.abs(dz) do extraY = extraY + hopStep() end
 
-    -- drop whatever altitude the hops accumulated
-    local here = Nav.locate()
-    for _ = 1, math.max(0, here.y - t.y) do Nav.down() end
+    -- drop whatever altitude the hops accumulated, plus any initial
+    -- altitude surplus (cur.y > t.y: target was lower than start).
+    -- Together these bring the final Y exactly to t.y.
+    local totalDescent = extraY + math.max(0, cur.y - t.y)
+    for _ = 1, totalDescent do Nav.down() end
 end
 
 return Nav

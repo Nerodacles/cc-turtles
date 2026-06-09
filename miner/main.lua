@@ -778,18 +778,22 @@ local function roomAbortReason()
 end
 
 -- ============================================================
--- HORIZONTAL DIG-WALK at the current Y, one axis at a time with a
--- fresh GPS fix per step (self-correcting). Axis order matters:
--- outbound "xz" and return "zx" retrace the SAME L-corridor.
--- With a shared entry, tunnels can overlap: head-on turtles are
--- OVERTAKEN over the top instead of deadlocking.
+-- HORIZONTAL DIG-WALK at the current Y, one axis at a time.
+-- Dead-reckoned: one GPS fix at the start establishes the initial
+-- delta; each successful forward step decrements by 1 (overtakes
+-- decrement by 2 because they advance 2 blocks). This eliminates
+-- a GPS locate per step while staying correct: digMove guarantees
+-- the move succeeds before returning, so dead-reckoning never drifts.
+-- Axis order matters: outbound "xz" and return "zx" retrace the SAME
+-- L-corridor. Head-on turtles are OVERTAKEN over the top.
 -- Returns false if lava blocks the way (sealed first).
 -- ============================================================
 local function walkAxis(axis, target)
-    while true do
-        local cur = Nav.locate()
-        local delta = (axis == "x") and (target - cur.x) or (target - cur.z)
-        if delta == 0 then return true end
+    -- ONE GPS fix to compute the starting delta; none inside the loop.
+    local cur = Nav.locate()
+    local delta = (axis == "x") and (target - cur.x) or (target - cur.z)
+
+    while delta ~= 0 do
         if axis == "x" then Nav.face(delta > 0 and 1 or 3)
         else Nav.face(delta > 0 and 0 or 2) end
 
@@ -803,8 +807,7 @@ local function walkAxis(axis, target)
         if ok and b.name:find("computercraft") then
             -- Another turtle ahead: wait a RANDOM patience (two
             -- head-on turtles with fixed timers overtake in lockstep
-            -- and re-collide forever), then climb over it (the GPS
-            -- loop self-corrects any overshoot)
+            -- and re-collide forever), then climb over it.
             local patience = 10 + math.random(20)
             local waited = 0
             while waited < patience do
@@ -817,14 +820,23 @@ local function walkAxis(axis, target)
             if o3 and b3.name:find("computercraft") then
                 print("[tunnel] Overtaking a turtle...")
                 Utils.up(state)
-                Utils.forward(state)
-                Utils.forward(state)
+                Utils.forward(state)   -- 1st forward over the blocker
+                Utils.forward(state)   -- 2nd forward (lands past it)
                 Utils.down(state)
+                -- Advanced 2 blocks in the axis direction; sign of delta
+                -- tells us the direction so we subtract the sign.
+                local sign = delta > 0 and 1 or -1
+                delta = delta - sign * 2
             end
+            -- If the blocker left while we waited, fall through to the
+            -- normal forward below (no delta consumed yet for this iter).
         else
             Utils.forward(state)
+            -- Consumed one step: shrink delta by 1 in the right direction.
+            delta = delta - (delta > 0 and 1 or -1)
         end
     end
+    return true
 end
 
 local function walkTo(tx, tz, order)
@@ -988,7 +1000,14 @@ local function roomStep(fast)
         if clearVert(turtle.inspectDown, turtle.digDown, turtle.placeDown) then sawOre = true end
     end
 
-    Utils.saveState(state)
+    -- Save every 10 normal steps (frontier pointer) to cut I/O from
+    -- 270 to ~27 writes per level. Crash resume fast-walks to the last
+    -- saved step (at most 9 extra already-cleared steps) - correct.
+    -- Always save before veinMine: a long chase can crash and we need
+    -- the frontier pinned at this cell so resume re-centres correctly.
+    if sawOre or (not fast and state.room.step % 10 == 0) then
+        Utils.saveState(state)
+    end
     if sawOre then veinMine(VEIN_MAX_DEPTH) end
     return true
 end
