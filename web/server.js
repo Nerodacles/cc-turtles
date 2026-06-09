@@ -176,8 +176,54 @@ function readVersion() {
     return m ? m[1] : "?";
   } catch { return "?"; }
 }
-const LATEST = readVersion();
-let bridgeVer = null;
+// LATEST is mutable — the periodic remote poll updates it at runtime without
+// restarting the pod.  Bootstrap from the local file cloned into the image.
+let LATEST = readVersion();
+
+// ---- REMOTE VERSION POLL --------------------------------------------
+// Refreshes LATEST from GitHub raw every VERSION_POLL_MS (default 30 min).
+// Uses the same regex as readVersion() so local and remote parses agree.
+// One poll fires ~30s after boot so a pod that started before a push catches
+// up quickly.  The flag _versionPollActive prevents overlapping fetches.
+let bridgeVer = null; // declared here so pollVersion() closes over it without a TDZ risk
+const _vpmRaw = parseInt(process.env.VERSION_POLL_MS || "1800000", 10);
+const VERSION_POLL_MS = Number.isNaN(_vpmRaw) || _vpmRaw < 1000 ? 1800000 : _vpmRaw;
+const VERSION_URL = "https://raw.githubusercontent.com/Nerodacles/cc-turtles/main/lib/version.lua";
+let _versionPollActive = false;
+
+async function pollVersion() {
+  if (_versionPollActive) return; // guard against overlap
+  _versionPollActive = true;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000); // 10s hard timeout
+  try {
+    const res = await fetch(VERSION_URL, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    const m = text.match(/return\s*"([^"]+)"/);
+    if (!m) throw new Error("version string not found in remote file");
+    const remote = m[1];
+    if (remote !== LATEST) {
+      console.log(`[version] latest ${LATEST} -> ${remote}`);
+      LATEST = remote;
+      // Push the new version to all open browser tabs — no page reload needed.
+      broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer });
+    }
+  } catch (err) {
+    // Network error, timeout, parse failure: keep existing LATEST, try again next interval.
+    console.warn("[version] remote poll failed:", err.message);
+  } finally {
+    clearTimeout(timer);
+    _versionPollActive = false;
+  }
+}
+
+// First poll 30s after boot (catches a push that landed while the pod was starting),
+// then on the regular VERSION_POLL_MS interval.
+setTimeout(() => {
+  pollVersion();
+  setInterval(pollVersion, VERSION_POLL_MS);
+}, 30000);
 
 // ---- latest known state, keyed by turtle id -------------------------
 const turtles = new Map(); // id -> { data, last }

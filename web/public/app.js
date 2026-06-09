@@ -116,6 +116,15 @@ function connect() {
         renderStats();
         return; // stats update doesn't require a full render() cycle
       }
+    } else if (m.type === "meta") {
+      // Server polled GitHub and found a newer version — update header live.
+      // Fields are optional: tolerate a partial payload from a future server.
+      if (m.latest != null) meta.latest = m.latest;
+      if (m.server != null) meta.server = m.server;
+      if (m.bridge !== undefined) meta.bridge = m.bridge;
+      renderMeta();
+      refreshUpdateBtn();
+      return; // no full render needed
     }
     render();
   };
