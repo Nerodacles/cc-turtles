@@ -185,6 +185,13 @@ const ores = [];           // discovered ores: { n, x, y, z } (capped FIFO)
 const ORE_CAP = 4000;
 const logs = new Map();     // id -> [recent log lines] (per turtle)
 const LOG_CAP = 300;
+const hazards = [];         // { hazard, pos, minerId, ts } (capped FIFO)
+const HAZARD_CAP = 200;
+// Hazard Discord dedup: key -> ts. Key = "<hazard>:<8-block-snap-x>,<8-block-snap-z>".
+// Suppresses repeat alerts for the same hazard type within ~8 blocks / 60s.
+const hazardSeen = new Map();
+const HAZARD_DEDUP_MS = 60000;
+const HAZARD_DEDUP_RADIUS = 8;
 
 // ---- ZONE REGISTRY (authoritative, persisted to the PVC) ------------
 // Per site "x,y,z": { done:{idx:1}, claims:{minerId:{idx,ts}} }. Miners
@@ -336,6 +343,11 @@ function rareDedupKey(x, y, z) {
   return `${Math.round(x / RARE_DEDUP_RADIUS)},${Math.round(y / RARE_DEDUP_RADIUS)},${Math.round(z / RARE_DEDUP_RADIUS)}`;
 }
 
+// F3: hazard dedup helper — snap to 8-block grid (X/Z only; depth matters less for hazard dedup).
+function hazardDedupKey(hazardType, x, z) {
+  return `${hazardType}:${Math.round(x / HAZARD_DEDUP_RADIUS)},${Math.round(z / HAZARD_DEDUP_RADIUS)}`;
+}
+
 // ---- static file server --------------------------------------------
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -395,6 +407,7 @@ const server = http.createServer((req, res) => {
       turtles: turtleList(),
       ores,
       zones,
+      hazards,
       bridge: bridgeVer,
       bridges: bridges.size,
       browsers: browsers.size,
@@ -504,7 +517,8 @@ wss.on("connection", (ws) => {
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
         send(ws, { type: "snapshot", turtles: snap, ores, needKey: !!CMD_KEY,
                    zones, lastKnown, latest: LATEST, server: LATEST, bridge: bridgeVer,
-                   stats: { session: stats.session, totals: stats.totals, history: stats.history } });
+                   stats: { session: stats.session, totals: stats.totals, history: stats.history },
+                   hazards });
       }
       return;
     }
@@ -640,6 +654,28 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // F3: hazard broadcast from bridge. Bridge forwards the miner's rednet
+    // "swarm_hazard" message as:
+    //   { type:"hazard", id:<computerID>, data:{ type:"hazard", hazard:<str>, pos:{x,y,z}, miner:<id>, k:<key> } }
+    if (ws.role === "bridge" && msg.type === "hazard" && msg.data && msg.data.hazard) {
+      const d = msg.data;
+      const h = { hazard: d.hazard, pos: d.pos, minerId: msg.id, ts: Date.now() };
+      hazards.push(h);
+      if (hazards.length > HAZARD_CAP) hazards.shift();
+      broadcast(browsers, { type: "hazards", hazards: [h] });
+      // Discord alert — dedup by type + 8-block XZ snap, 60s window
+      if (WEBHOOK_URL && d.pos) {
+        const dk = hazardDedupKey(d.hazard, d.pos.x, d.pos.z);
+        const lastSeen = hazardSeen.get(dk) || 0;
+        const now = Date.now();
+        if (now - lastSeen > HAZARD_DEDUP_MS) {
+          hazardSeen.set(dk, now);
+          sendWebhook(`🔴 Hazard: ${d.hazard} at X${d.pos.x} Y${d.pos.y} Z${d.pos.z} (miner ${msg.id})`);
+        }
+      }
+      return;
+    }
+
     // A browser watches one turtle's log: send the stored log, then
     // stream live appends for that id only. Requires the command key
     // (the log is only visible to authorized users).
@@ -751,10 +787,13 @@ setInterval(() => {
     }
   }
 
-  // 5. Prune old rare-ore dedup entries and webhookState for evicted turtles
+  // 5. Prune old rare-ore dedup entries, hazard dedup entries, and webhookState for evicted turtles
   if (WEBHOOK_URL) {
     for (const [k, ts] of rareSeen) {
       if (now - ts > RARE_DEDUP_MS * 2) rareSeen.delete(k);
+    }
+    for (const [k, ts] of hazardSeen) {
+      if (now - ts > HAZARD_DEDUP_MS * 2) hazardSeen.delete(k);
     }
     // Prune webhookState for turtles no longer in lastKnown (fully gone)
     for (const [id] of webhookState) {

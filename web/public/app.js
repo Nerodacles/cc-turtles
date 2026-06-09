@@ -14,6 +14,10 @@ let watchId = null;        // turtle whose detail panel is open
 // F4: stats state — mirrors server-side shape; null until first snapshot/stats msg.
 let statsData = null; // { session:{start,ores}, totals, history }
 
+// F3: hazard state — array of { hazard, pos, minerId, ts }; bounded FIFO.
+const HAZARD_CLIENT_CAP = 200;
+let hazardsData = []; // populated from snapshot + hazards delta messages
+
 // ore name -> color (drops the minecraft:/_ore already)
 const ORE_COLOR = {
   diamond: "#4ee6e6", emerald: "#3fe06b", ancient_debris: "#a8682f",
@@ -44,6 +48,8 @@ function connect() {
       zonesData = m.zones || {};
       // F4: load stats from snapshot (absent in older server versions — handle gracefully)
       if (m.stats && m.stats.session && m.stats.totals) statsData = m.stats;
+      // F3: load hazards from snapshot (absent in older server versions — tolerate gracefully)
+      hazardsData = Array.isArray(m.hazards) ? m.hazards.slice(-HAZARD_CLIENT_CAP) : [];
       lockUI();
       renderMeta();
       renderZones();
@@ -95,6 +101,10 @@ function connect() {
     } else if (m.type === "ores") {
       for (const o of m.ores) ores.push(o);
       if (ores.length > 4000) ores.splice(0, ores.length - 4000);
+    } else if (m.type === "hazards") {
+      // F3: delta from server — append new hazards, trim to cap
+      for (const h of (m.hazards || [])) hazardsData.push(h);
+      if (hazardsData.length > HAZARD_CLIENT_CAP) hazardsData.splice(0, hazardsData.length - HAZARD_CLIENT_CAP);
     } else if (m.type === "gone") {
       turtles.delete(m.id);
       trailClear(m.id);  // discard trail when turtle goes offline
@@ -125,12 +135,19 @@ function renderMeta() {
 function renderZones() {
   const el = document.getElementById("zones");
   if (!el) return;
-  let done = 0, active = 0;
+  let done = 0, active = 0, sites = 0;
   for (const z of Object.values(zonesData)) {
-    if (z && z.done) done += Object.keys(z.done).length;
-    if (z && z.claims) active += Object.keys(z.claims).length;
+    if (!z) continue;
+    // Count this site if it has any zone activity recorded
+    const hasDone = z.done && Object.keys(z.done).length > 0;
+    const hasClaims = z.claims && Object.keys(z.claims).length > 0;
+    const hasProg = z.prog && Object.keys(z.prog).length > 0;
+    if (hasDone || hasClaims || hasProg) sites++;
+    if (z.done) done += Object.keys(z.done).length;
+    if (z.claims) active += Object.keys(z.claims).length;
   }
-  el.textContent = `${done} zones done · ${active} active`;
+  const sitesStr = sites > 1 ? ` · ${sites} sites` : "";
+  el.textContent = `${done} zones done · ${active} active${sitesStr}`;
 }
 // ---- command key (gates the buttons; saved in localStorage) --------
 let cmdKey = localStorage.getItem("cmdkey") || "";
@@ -738,6 +755,66 @@ function renderMap() {
     ctx.beginPath(); ctx.arc(ox, oy, oreR * 2, 0, Math.PI * 2); ctx.fill();
   }
 
+  // ---- 4b. HAZARDS (lava_lake / spawner / cavern) ---------------------
+  // Drawn above ores; viewport-culled. Each type has a distinct shape.
+  // ctx state is fully reset after this block so nothing bleeds into later layers.
+  if (hazardsData.length) {
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
+    const hazR = Math.max(3, Math.min(9, view.scale * 1.6)); // marker radius in px
+
+    for (const hz of hazardsData) {
+      if (!hz.pos) continue;
+      const hx = X(hz.pos.x), hy = Y(hz.pos.z);
+      // Cull to viewport with margin
+      const margin = hazR * 3;
+      if (hx < -margin || hx > w + margin || hy < -margin || hy > h + margin) continue;
+
+      if (hz.hazard === "lava_lake") {
+        // Red filled circle with orange edge glow
+        ctx.fillStyle = "rgba(248,81,73,0.85)";
+        ctx.strokeStyle = "rgba(255,140,0,0.6)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(hx, hy, hazR, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+      } else if (hz.hazard === "spawner") {
+        // Orange triangle pointing up
+        const s = hazR * 1.3;
+        ctx.fillStyle = "rgba(210,153,34,0.85)";
+        ctx.strokeStyle = "rgba(255,200,60,0.6)";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(hx, hy - s);
+        ctx.lineTo(hx + s * 0.87, hy + s * 0.5);
+        ctx.lineTo(hx - s * 0.87, hy + s * 0.5);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+      } else {
+        // cavern (and any unknown type) — grey hollow rect
+        const s = hazR * 1.1;
+        ctx.strokeStyle = "rgba(139,151,167,0.75)";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(hx - s, hy - s, s * 2, s * 2);
+      }
+
+      // Small label when zoomed in enough
+      if (view.scale >= 1.2) {
+        ctx.font = "9px ui-monospace, monospace";
+        ctx.textBaseline = "top";
+        const lbl = hz.hazard || "hazard";
+        ctx.fillStyle = "rgba(8,11,16,0.75)";
+        ctx.fillText(lbl, hx + hazR + 2, hy - 4);
+        ctx.fillStyle = hz.hazard === "lava_lake" ? "rgba(248,81,73,0.9)"
+                      : hz.hazard === "spawner"   ? "rgba(210,153,34,0.9)"
+                      :                             "rgba(139,151,167,0.9)";
+        ctx.fillText(lbl, hx + hazR + 3, hy - 5);
+        ctx.textBaseline = "alphabetic";
+      }
+    }
+    ctx.restore();
+  }
+
   // ---- 5. OFFLINE TURTLES (lastKnown dagger markers) -----------------
   ctx.font = "10px ui-monospace, monospace";
   for (const [sid, r] of Object.entries(lastKnown)) {
@@ -919,6 +996,9 @@ function renderMap() {
       { col: "rgba(139,151,167,0.55)", text: "-- -  assignment to zone" },
       { col: "rgba(63,185,80,0.55)",   text: "trail = recent dig path" },
       { col: "rgba(139,151,167,0.55)", text: "○  shaft transit" },
+      { col: "rgba(248,81,73,0.75)",   text: "●  lava lake hazard" },
+      { col: "rgba(210,153,34,0.75)",  text: "▲  spawner hazard" },
+      { col: "rgba(139,151,167,0.75)", text: "□  cavern hazard" },
     ];
     const lineH = 13;
     for (let i = 0; i < items.length; i++) {
