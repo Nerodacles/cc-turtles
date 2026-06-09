@@ -49,6 +49,42 @@ const DATA = process.env.DATA_DIR || "/data";
 const ZONES_FILE = path.join(DATA, "zones.json");
 const TURTLES_FILE = path.join(DATA, "turtles.json");
 const CLAIM_TTL = parseInt(process.env.CLAIM_TTL_MS || "1800000", 10); // 30m
+
+// ---- PERSISTENT LOGS: one file per day on the PVC, auto-pruned -------
+// Turtle log lines (already streamed live to watchers) are also appended
+// to /data/logs/YYYY-MM-DD.log so they survive a pod restart. Files older
+// than LOG_RETAIN_DAYS are deleted, so the PVC never fills up.
+const LOG_DIR = path.join(DATA, "logs");
+const LOG_RETAIN_DAYS = parseInt(process.env.LOG_RETAIN_DAYS || "7", 10);
+try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (e) { console.error("[logs] mkdir:", e.message); }
+const dayStamp = (d = new Date()) => d.toISOString().slice(0, 10); // YYYY-MM-DD
+let logBuf = []; // pending lines, flushed to the day file every few seconds
+function appendLog(id, label, lines) {
+  const ts = new Date().toISOString();
+  const tag = label || ("#" + id);
+  for (const ln of lines) logBuf.push(`${ts} [${tag}] ${ln}`);
+}
+setInterval(() => {
+  if (!logBuf.length) return;
+  const file = path.join(LOG_DIR, dayStamp() + ".log");
+  const data = logBuf.join("\n") + "\n";
+  logBuf = [];
+  fs.appendFile(file, data, (e) => { if (e) console.error("[logs] append:", e.message); });
+}, 3000);
+function pruneLogs() { // delete day-files older than the retention window
+  fs.readdir(LOG_DIR, (err, files) => {
+    if (err) return;
+    const cutoff = Date.now() - LOG_RETAIN_DAYS * 86400000;
+    for (const f of files) {
+      const m = f.match(/^(\d{4}-\d{2}-\d{2})\.log$/);
+      if (!m) continue;
+      const t = Date.parse(m[1]);
+      if (!isNaN(t) && t < cutoff) fs.unlink(path.join(LOG_DIR, f), () => {});
+    }
+  });
+}
+setInterval(pruneLogs, 6 * 3600 * 1000); // every 6h
+pruneLogs(); // and once on boot
 let zones = {};
 try { zones = JSON.parse(fs.readFileSync(ZONES_FILE, "utf8")); } catch { zones = {}; }
 // lastKnown: persisted label/pos/level per turtle so a pod restart doesn't
@@ -143,6 +179,34 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(out, null, 2));
   }
+  // Persisted logs. Key-gated (same CMD_KEY as the live log watch).
+  //   /api/logs            -> JSON list of available day-files + sizes
+  //   /api/logs?day=DATE   -> the raw text of that day's log
+  if (urlPath === "/api/logs") {
+    const q = new URLSearchParams((req.url || "").split("?")[1] || "");
+    if (CMD_KEY && q.get("key") !== CMD_KEY) { res.writeHead(401); return res.end("key required"); }
+    const day = q.get("day");
+    if (day) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { res.writeHead(400); return res.end("bad day"); }
+      return fs.readFile(path.join(LOG_DIR, day + ".log"), (err, buf) => {
+        if (err) { res.writeHead(404); return res.end("no log for " + day); }
+        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end(buf);
+      });
+    }
+    return fs.readdir(LOG_DIR, (err, files) => {
+      const days = (err ? [] : files)
+        .map((f) => f.match(/^(\d{4}-\d{2}-\d{2})\.log$/))
+        .filter(Boolean)
+        .map((m) => {
+          let size = 0; try { size = fs.statSync(path.join(LOG_DIR, m[0])).size; } catch {}
+          return { day: m[1], bytes: size };
+        })
+        .sort((a, b) => b.day.localeCompare(a.day));
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ retainDays: LOG_RETAIN_DAYS, days }, null, 2));
+    });
+  }
   if (urlPath === "/") urlPath = "/index.html";
   const file = path.join(PUBLIC, path.normalize(urlPath).replace(/^(\.\.[/\\])+/, ""));
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end("forbidden"); }
@@ -218,6 +282,7 @@ wss.on("connection", (ws) => {
         delete msg.data.log;
         let arr = logs.get(msg.id); if (!arr) { arr = []; logs.set(msg.id, arr); }
         for (const ln of newLog) { arr.push(ln); if (arr.length > LOG_CAP) arr.shift(); }
+        appendLog(msg.id, msg.data.label, newLog); // persist to the daily file
         // stream only to browsers watching this turtle
         for (const b of browsers) if (b.watching === msg.id) send(b, { type: "log", id: msg.id, lines: newLog });
       }
@@ -308,3 +373,16 @@ setInterval(() => {
 server.listen(PORT, () => {
   console.log(`[dashboard] http + ws on :${PORT}`);
 });
+
+// Flush any buffered log lines synchronously on shutdown (K8s sends
+// SIGTERM before killing the pod) so the last few seconds aren't lost.
+function flushAndExit() {
+  if (logBuf.length) {
+    try { fs.appendFileSync(path.join(LOG_DIR, dayStamp() + ".log"), logBuf.join("\n") + "\n"); }
+    catch (e) { console.error("[logs] final flush:", e.message); }
+    logBuf = [];
+  }
+  process.exit(0);
+}
+process.on("SIGTERM", flushAndExit);
+process.on("SIGINT", flushAndExit);

@@ -42,6 +42,8 @@ mc/
 
 A browser dashboard mirrors the pocket: live turtle cards + a top-down map (positions, mining zones, fuel/inventory), with command buttons (start/pause/resume/home/update, and set-entry by coords).
 
+**Persisted logs** — every turtle log line (also streamed live to the per-turtle watch panel) is appended to a daily file on the PVC at `/data/logs/YYYY-MM-DD.log`, so they survive a pod restart. Files older than `LOG_RETAIN_DAYS` (default 7) are auto-deleted. Browse them (key-gated like the live watch): `GET /api/logs` lists the available days + sizes, `GET /api/logs?day=YYYY-MM-DD&key=KEY` returns that day's raw text. The map also persists last-known turtle positions and all mined zones across restarts (loaded from `turtles.json` / `zones.json` on the same PVC).
+
 ```
 turtles ──rednet swarm_status──▶ bridge (CC computer) ──WebSocket──▶ Node server ──▶ browsers
                                        ◀────────────── commands ◀──────────────────

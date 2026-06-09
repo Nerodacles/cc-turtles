@@ -48,6 +48,9 @@ spec:
           env:
             - { name: PORT, value: "8080" }
             - { name: STALE_MS, value: "20000" }
+            # Persisted turtle logs: one file per day under /data/logs,
+            # files older than this many days are auto-deleted.
+            - { name: LOG_RETAIN_DAYS, value: "7" }
             # Command gate: browsers must enter this key to issue
             # commands. Sourced from a Secret (not in git) - create it:
             #   kubectl -n devops create secret generic cc-turtles-cmdkey \
