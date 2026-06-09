@@ -11,6 +11,9 @@ let ws, reconnectT;
 let meta = { latest: "?", server: "?", bridge: null };
 let watchId = null;        // turtle whose detail panel is open
 
+// F4: stats state — mirrors server-side shape; null until first snapshot/stats msg.
+let statsData = null; // { session:{start,ores}, totals, history }
+
 // ore name -> color (drops the minecraft:/_ore already)
 const ORE_COLOR = {
   diamond: "#4ee6e6", emerald: "#3fe06b", ancient_debris: "#a8682f",
@@ -39,9 +42,12 @@ function connect() {
       if (Array.isArray(m.ores)) for (const o of m.ores) ores.push(o);
       needKey = !!m.needKey;
       zonesData = m.zones || {};
+      // F4: load stats from snapshot (absent in older server versions — handle gracefully)
+      if (m.stats && m.stats.session && m.stats.totals) statsData = m.stats;
       lockUI();
       renderMeta();
       renderZones();
+      renderStats();
     } else if (m.type === "zones") {
       if (m.site === "*" || m.z === null) {
         if (m.site === "*") zonesData = {}; else delete zonesData[m.site];
@@ -93,6 +99,13 @@ function connect() {
       turtles.delete(m.id);
       trailClear(m.id);  // discard trail when turtle goes offline
       // keep lastKnown — offline turtle shows its last position in the list
+    } else if (m.type === "stats") {
+      // F4: server broadcasts updated stats after ore events (~5s debounce)
+      if (m.session && m.totals) {
+        statsData = { session: m.session, totals: m.totals, history: m.history || [] };
+        renderStats();
+        return; // stats update doesn't require a full render() cycle
+      }
     }
     render();
   };
@@ -930,6 +943,57 @@ function hexToRgba(hex, a) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
+// ---- F4: Stats panel --------------------------------------------------
+function renderStats() {
+  const tbody = document.getElementById("statsBody");
+  const sessionLabel = document.getElementById("statsSession");
+  if (!tbody) return;
+  if (!statsData) {
+    tbody.innerHTML = '<tr><td colspan="4" class="statsDim">no ore data yet</td></tr>';
+    if (sessionLabel) sessionLabel.textContent = "";
+    return;
+  }
+  const { session, totals } = statsData;
+  // Session start label: relative time
+  if (sessionLabel && session.start) {
+    const elapsed = Date.now() - new Date(session.start).getTime();
+    const h = Math.floor(elapsed / 3600000);
+    const m2 = Math.floor((elapsed % 3600000) / 60000);
+    sessionLabel.textContent = h > 0 ? `(${h}h ${m2}m)` : `(${m2}m)`;
+  }
+  // Build sorted rows: session ores first, then totals-only entries
+  const allNames = new Set([...Object.keys(session.ores || {}), ...Object.keys(totals || {})]);
+  if (!allNames.size) {
+    tbody.innerHTML = '<tr><td colspan="4" class="statsDim">no ore data yet</td></tr>';
+    return;
+  }
+  // Sort by session count desc, then total count desc
+  const sorted = [...allNames].sort((a, b) => {
+    const ds = (session.ores[b] || 0) - (session.ores[a] || 0);
+    if (ds !== 0) return ds;
+    return (totals[b] || 0) - (totals[a] || 0);
+  });
+  // Max session count for bar width scaling
+  const maxSess = Math.max(1, ...sorted.map((n) => session.ores[n] || 0));
+  // Session duration in hours for rate
+  const sessionElapsedH = Math.max(1 / 60, (Date.now() - new Date(session.start).getTime()) / 3600000);
+  let html = "";
+  for (const name of sorted) {
+    const sess = session.ores[name] || 0;
+    const tot = totals[name] || 0;
+    const rateH = sess > 0 ? (sess / sessionElapsedH).toFixed(1) : "—";
+    const barW = Math.max(3, Math.round((sess / maxSess) * 48));
+    const col = oreColor(name);
+    html += `<tr>
+      <td><span class="statsOreBar" style="width:${barW}px;background:${col}"></span><span class="statsOreName">${esc(name)}</span></td>
+      <td>${sess || "—"}</td>
+      <td>${rateH}</td>
+      <td>${tot || "—"}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
 function renderLegend() {
   const el = document.getElementById("legend");
   if (!el) return;
@@ -943,7 +1007,7 @@ function renderLegend() {
     `<div class="row tot"><span class="n">found</span><span class="c">${ores.length}</span></div>`;
 }
 
-function render() { trailPrune(); renderList(); renderMap(); renderLegend(); refreshUpdateBtn(); }
+function render() { trailPrune(); renderList(); renderMap(); renderLegend(); renderStats(); refreshUpdateBtn(); }
 
 fit(); lockUI(); connect();
 setInterval(render, 1000); // refresh stale fades + ages

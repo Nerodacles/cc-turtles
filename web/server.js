@@ -15,6 +15,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const https = require("https");
 const { WebSocketServer } = require("ws");
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -26,6 +27,128 @@ const CMD_KEY = process.env.CMD_KEY || "";
 // Read-only API key. Absent/empty => read API is DISABLED (503).
 // Set READ_KEY in the deployment Secret (cc-turtles-readkey).
 const READ_KEY = process.env.READ_KEY || "";
+
+// ---- F5: WEBHOOK CONFIG ---------------------------------------------
+// WEBHOOK_URL: Discord-compatible HTTPS POST endpoint. Absent = no-op.
+// WEBHOOK_STALE_MS: silence before "offline" alert (default 5min).
+// WEBHOOK_FUEL_THRESHOLD: absolute fuel below which "fuel critical" fires.
+const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
+const WEBHOOK_STALE_MS = parseInt(process.env.WEBHOOK_STALE_MS || "300000", 10);
+const WEBHOOK_FUEL_THRESHOLD = parseInt(process.env.WEBHOOK_FUEL_THRESHOLD || "500", 10);
+// Warm-up grace: suppress offline alerts for 90s after process start.
+const startTs = Date.now();
+const WARMUP_GRACE_MS = 90000;
+// Per-turtle webhook state. Never log or broadcast these.
+// alerted: offline alert has fired; re-arms when turtle comes back.
+// fuelAlerted: fuel-critical alert fired; re-arms when fuel >= threshold+200.
+// lastFuel: last known fuel to detect crossing.
+const webhookState = new Map(); // id -> { alerted:bool, fuelAlerted:bool, lastFuel:number|null }
+// Diamond dedup: "x,y,z" -> timestamp, block within ~3 blocks per 60s.
+const diamondSeen = new Map(); // posKey -> ts
+const DIAMOND_DEDUP_MS = 60000;
+const DIAMOND_DEDUP_RADIUS = 3;
+// Site-finished dedup: siteKey -> bool (fire once, reset only on zones reset).
+const siteFinishedAlerted = new Set();
+
+function wState(id) {
+  let s = webhookState.get(id);
+  if (!s) { s = { alerted: false, fuelAlerted: false, lastFuel: null }; webhookState.set(id, s); }
+  return s;
+}
+
+// sendWebhook: POST { content: text } to WEBHOOK_URL. Never throws, never logs the URL.
+function sendWebhook(text) {
+  if (!WEBHOOK_URL) return;
+  try {
+    const body = JSON.stringify({ content: text });
+    const url = new URL(WEBHOOK_URL);
+    const opts = {
+      hostname: url.hostname,
+      port: url.port || 443,
+      path: url.pathname + url.search,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    };
+    const req = https.request(opts, (res) => { res.resume(); });
+    req.on("error", () => {});
+    req.setTimeout(8000, () => { req.destroy(); });
+    req.write(body);
+    req.end();
+  } catch (_) {}
+}
+
+// ---- F4: STATS CONFIG + STATE ----------------------------------------
+// IDLE_SESSION_GAP_MS: if no miner heartbeat for this long, close session.
+const IDLE_SESSION_GAP_MS = parseInt(process.env.IDLE_SESSION_GAP_MS || "1800000", 10);
+const STATS_FILE = path.join(process.env.DATA_DIR || "/data", "stats.json");
+const STATS_HISTORY_CAP = 90; // max daily history entries
+
+// Stats object shape:
+// { session: { start: ISO, ores: {oreName:count} },
+//   totals: {oreName:count},
+//   history: [ { day:"YYYY-MM-DD", ores:{...} } ] }
+let stats = { session: { start: new Date().toISOString(), ores: {} }, totals: {}, history: [] };
+// Load from PVC — tolerate missing or corrupt file.
+try {
+  const raw = JSON.parse(fs.readFileSync(STATS_FILE, "utf8"));
+  // Validate shape; fall back to fresh on any missing key.
+  if (raw && raw.session && typeof raw.session.start === "string" &&
+      typeof raw.session.ores === "object" && raw.session.ores !== null &&
+      typeof raw.totals === "object" && raw.totals !== null &&
+      Array.isArray(raw.history)) {
+    stats = raw;
+  }
+} catch { /* file missing or corrupt — start fresh, never crash */ }
+
+let statsWriteT = null;
+function saveStats() { // debounced write (mirrors saveZones pattern)
+  if (statsWriteT) return;
+  statsWriteT = setTimeout(() => {
+    statsWriteT = null;
+    try {
+      fs.mkdirSync(path.dirname(STATS_FILE), { recursive: true });
+      fs.writeFileSync(STATS_FILE, JSON.stringify(stats));
+    } catch (e) { console.error("[stats] save failed:", e.message); }
+  }, 500);
+}
+
+// Broadcast stats to browsers — debounced ~5s so a burst of ores doesn't spam.
+let statsBcastT = null;
+function broadcastStats() {
+  if (statsBcastT) return;
+  statsBcastT = setTimeout(() => {
+    statsBcastT = null;
+    broadcast(browsers, { type: "stats", session: stats.session, totals: stats.totals, history: stats.history });
+  }, 5000);
+}
+
+// Tally one ore event into session + totals + today's history bucket.
+function tallyOre(oreName) {
+  stats.session.ores[oreName] = (stats.session.ores[oreName] || 0) + 1;
+  stats.totals[oreName] = (stats.totals[oreName] || 0) + 1;
+  const today = dayStamp();
+  let bucket = stats.history.find((h) => h.day === today);
+  if (!bucket) {
+    bucket = { day: today, ores: {} };
+    stats.history.push(bucket);
+    if (stats.history.length > STATS_HISTORY_CAP)
+      stats.history.splice(0, stats.history.length - STATS_HISTORY_CAP);
+  }
+  bucket.ores[oreName] = (bucket.ores[oreName] || 0) + 1;
+}
+
+// Session idle tracking: track last miner heartbeat timestamp.
+let lastMinerTs = Date.now(); // initialise to now so grace window applies on boot
+function maybeRollSession() {
+  if (Date.now() - lastMinerTs > IDLE_SESSION_GAP_MS) {
+    stats.session = { start: new Date().toISOString(), ores: {} };
+    lastMinerTs = Date.now();
+    saveStats(); // persist new session start so a restart doesn't reload the old one
+    console.log("[stats] new session (idle gap elapsed)");
+  }
+}
+// Check idle every minute.
+setInterval(() => { maybeRollSession(); }, 60000);
 
 // ---- LATEST version: read the single global lib/version.lua ---------
 // (the no-build pod clones the repo, so this file is right here)
@@ -146,6 +269,8 @@ function doneZone(site, miner, idx) {
   z.done[idx] = 1;
   if (z.claims[miner] && z.claims[miner].idx === idx) delete z.claims[miner];
   saveZones();
+  // F5: check if this site is now fully finished (no live claims, all known indices done)
+  checkSiteFinished(siteKey(site));
 }
 function touchClaim(site, miner, idx, level) { // renew from heartbeat
   if (!site || idx == null) return;
@@ -158,6 +283,40 @@ function touchClaim(site, miner, idx, level) { // renew from heartbeat
   if (z.done[idx]) { saveZones(); return; }
   z.claims[miner] = { idx, ts: Date.now() };
   saveZones();
+}
+
+// F5: site finished — fire when all known spiral indices (0..maxIdx) are done
+// and there are no live claims remaining.
+function checkSiteFinished(sk) {
+  if (!WEBHOOK_URL) return;
+  if (siteFinishedAlerted.has(sk)) return;
+  const zr = zones[sk];
+  if (!zr) return;
+  // Must have at least one done zone.
+  const doneKeys = Object.keys(zr.done || {});
+  if (!doneKeys.length) return;
+  // Prune stale claims (same logic as allocZone) so a crashed miner that never
+  // sent "done" doesn't hold the site-finished alert back for the full CLAIM_TTL.
+  const now = Date.now();
+  if (zr.claims) {
+    for (const [m, c] of Object.entries(zr.claims)) {
+      if (now - c.ts >= CLAIM_TTL) delete zr.claims[m];
+    }
+  }
+  // Any live (non-stale) claims? Then not finished.
+  if (Object.keys(zr.claims || {}).length > 0) return;
+  // Are all indices 0..max done?
+  const maxIdx = Math.max(...doneKeys.map(Number));
+  for (let i = 0; i <= maxIdx; i++) {
+    if (!zr.done[i]) return; // gap — not all done
+  }
+  siteFinishedAlerted.add(sk);
+  sendWebhook(`Site ${sk} finished — all ${maxIdx + 1} zones mined.`);
+}
+
+// F5: diamond dedup helper — snap position to 3-block grid for dedup.
+function diamondDedupKey(x, y, z) {
+  return `${Math.round(x / DIAMOND_DEDUP_RADIUS)},${Math.round(y / DIAMOND_DEDUP_RADIUS)},${Math.round(z / DIAMOND_DEDUP_RADIUS)}`;
 }
 
 // ---- static file server --------------------------------------------
@@ -237,6 +396,15 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify(turtleList(), null, 2));
   }
 
+  // GET /api/stats — F4 ore/yield stats; requires READ_KEY.
+  if (urlPath === "/api/stats") {
+    if (req.method !== "GET") { res.writeHead(405); return res.end("method not allowed"); }
+    if (!READ_KEY) { res.writeHead(503); return res.end("read API disabled"); }
+    if (!checkReadKey(req)) { res.writeHead(401); return res.end("unauthorized"); }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(stats, null, 2));
+  }
+
   // Persisted logs. Key-gated (same CMD_KEY as the live log watch).
   //   /api/logs            -> JSON list of available day-files + sizes
   //   /api/logs?day=DATE   -> the raw text of that day's log
@@ -313,12 +481,13 @@ wss.on("connection", (ws) => {
         if (msg.ver) bridgeVer = msg.ver;
       } else {
         browsers.add(ws);
-        // send the full current snapshot to the new tab
+        // send the full current snapshot to the new tab (includes stats for F4)
         const now = Date.now();
         const snap = [];
         for (const [id, t] of turtles) snap.push({ id, data: t.data, age: now - t.last });
         send(ws, { type: "snapshot", turtles: snap, ores, needKey: !!CMD_KEY,
-                   zones, lastKnown, latest: LATEST, server: LATEST, bridge: bridgeVer });
+                   zones, lastKnown, latest: LATEST, server: LATEST, bridge: bridgeVer,
+                   stats: { session: stats.session, totals: stats.totals, history: stats.history } });
       }
       return;
     }
@@ -331,6 +500,20 @@ wss.on("connection", (ws) => {
         for (const o of newOres) {
           ores.push(o);
           if (ores.length > ORE_CAP) ores.shift();
+          // F4: tally ore into stats
+          tallyOre(o.n);
+          broadcastStats();
+          saveStats();
+          // F5: diamond alert — dedup by position within ~3 blocks per 60s
+          if (WEBHOOK_URL && o.n === "diamond") {
+            const dk = diamondDedupKey(o.x, o.y, o.z);
+            const last = diamondSeen.get(dk) || 0;
+            const now2 = Date.now();
+            if (now2 - last > DIAMOND_DEDUP_MS) {
+              diamondSeen.set(dk, now2);
+              sendWebhook(`Diamond found at X${o.x} Y${o.y} Z${o.z}!`);
+            }
+          }
         }
         broadcast(browsers, { type: "ores", ores: newOres });
       }
@@ -347,6 +530,8 @@ wss.on("connection", (ws) => {
       // renew this miner's zone claim + record its mined layer
       if (msg.data.role === "miner" && msg.data.site && msg.data.zoneIdx != null)
         touchClaim(msg.data.site, msg.id, msg.data.zoneIdx, msg.data.level);
+      // F4: update last miner heartbeat ts for session-idle tracking
+      if (msg.data.role === "miner") lastMinerTs = Date.now();
       turtles.set(msg.id, { data: msg.data, last: Date.now() });
       // persist last known label/pos/level so a restart doesn't lose
       // where a turtle was (e.g. to locate a lost/silent turtle)
@@ -359,6 +544,23 @@ wss.on("connection", (ws) => {
         if (d.role)  rec.role  = d.role;
         rec.ts = Date.now();
         saveTurtles(); }
+      // F5: fuel-critical alert
+      if (WEBHOOK_URL && msg.data.fuel != null && typeof msg.data.fuel === "number") {
+        const ws2 = wState(msg.id);
+        const fuel = msg.data.fuel;
+        if (!ws2.fuelAlerted && fuel < WEBHOOK_FUEL_THRESHOLD) {
+          ws2.fuelAlerted = true;
+          ws2.lastFuel = fuel;
+          const label = msg.data.label || ("#" + msg.id);
+          sendWebhook(`Fuel critical: ${label} has ${fuel} fuel (threshold: ${WEBHOOK_FUEL_THRESHOLD}).`);
+        } else if (ws2.fuelAlerted && fuel >= WEBHOOK_FUEL_THRESHOLD + 200) {
+          // Re-arm: turtle has been refueled
+          ws2.fuelAlerted = false;
+        }
+        ws2.lastFuel = fuel;
+      }
+      // Re-arm offline alert when turtle comes back online
+      wState(msg.id).alerted = false;
       broadcast(browsers, { type: "status", id: msg.id, data: msg.data });
       return;
     }
@@ -399,10 +601,13 @@ wss.on("connection", (ws) => {
     if (ws.role === "browser" && msg.type === "command" && msg.payload) {
       if (CMD_KEY && msg.key !== CMD_KEY) { send(ws, { type: "denied" }); return; }
       // reset_zones is a SERVER action (free a site to be mined again),
-      // not a turtle command - handle it here, don't forward to bridges
+      // not a turtle command - handle it here, don't forward to bridges.
+      // NOTE: intentionally does NOT touch stats — they are orthogonal.
       if (msg.payload.cmd === "reset_zones") {
         const s = msg.payload.site;
         if (s && zones[s]) delete zones[s]; else zones = {};
+        // Reset site-finished dedup so alerts can fire again on the new run.
+        if (s) siteFinishedAlerted.delete(s); else siteFinishedAlerted.clear();
         saveZones();
         broadcast(browsers, { type: "zones", site: s || "*", z: null });
         return;
@@ -417,13 +622,38 @@ wss.on("connection", (ws) => {
   ws.on("error", () => { browsers.delete(ws); bridges.delete(ws); });
 });
 
-// ---- prune stale turtles + tell browsers ----------------------------
+// ---- prune stale turtles + tell browsers + F5 offline alerts -------
 setInterval(() => {
   const now = Date.now();
+  const inGrace = now - startTs < WARMUP_GRACE_MS;
+  // 1. Evict turtles that haven't heartbeated within STALE_MS.
   for (const [id, t] of turtles) {
     if (now - t.last > STALE_MS) {
       turtles.delete(id);
       broadcast(browsers, { type: "gone", id });
+    }
+  }
+  // 2. F5: Offline alerts — scanned from lastKnown so the WEBHOOK_STALE_MS
+  //    threshold is independent of STALE_MS (which is usually much shorter).
+  //    Fires once per offline event; re-armed when the turtle sends a heartbeat.
+  if (WEBHOOK_URL && !inGrace) {
+    for (const [id, rec] of Object.entries(lastKnown)) {
+      // Only alert for turtles that are currently offline (not in turtles map)
+      if (turtles.has(+id)) continue;
+      if (!rec.ts) continue;
+      const silentMs = now - rec.ts;
+      if (silentMs < WEBHOOK_STALE_MS) continue;
+      const ws2 = wState(+id);
+      if (ws2.alerted) continue;
+      ws2.alerted = true;
+      const label = rec.label || ("#" + id);
+      sendWebhook(`Turtle ${label} has gone offline (no heartbeat for ${Math.round(silentMs / 60000)}m).`);
+    }
+  }
+  // 3. Prune old diamond dedup entries
+  if (WEBHOOK_URL) {
+    for (const [k, ts] of diamondSeen) {
+      if (now - ts > DIAMOND_DEDUP_MS * 2) diamondSeen.delete(k);
     }
   }
 }, 5000);

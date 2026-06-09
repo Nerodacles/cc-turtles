@@ -73,6 +73,19 @@ spec:
                   name: cc-turtles-readkey
                   key: key
                   optional: true
+            # F5: Webhook (Discord-compatible) alert URL. Sourced from a
+            # Secret so the URL is never in git. Create it:
+            #   kubectl -n devops create secret generic cc-turtles-webhook \
+            #     --from-literal=url=https://discord.com/api/webhooks/...
+            # Absent secret = webhook disabled (no-op). optional: true.
+            - name: WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cc-turtles-webhook
+                  key: url
+                  optional: true
+            # Absolute fuel count below which "fuel critical" fires (default 500).
+            - { name: WEBHOOK_FUEL_THRESHOLD, value: "500" }
           ports: [{ containerPort: 8080 }]
           readinessProbe:
             tcpSocket: { port: 8080 }
