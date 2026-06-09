@@ -473,8 +473,9 @@ function renderMap() {
   function line(a, b, c2, d2) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d2); ctx.stroke(); }
 
   // ---- 1. TERRAIN BACKGROUND: per-chunk tint -------------------------
-  // Only paint when zoom is not so far out that chunks are sub-pixel.
-  const step = 16 * view.scale; // pixels per chunk
+  // Terrain tint stays anchored to true Minecraft chunk boundaries (multiples
+  // of 16) regardless of zone-lattice phase — it is pure visual texture.
+  const step = 16 * view.scale; // pixels per one ZONE_SPREAD / one chunk
   if (step >= 3) {
     // World coords of visible corners → chunk range to paint
     const cx0 = Math.floor(Xw(0) / 16) - 1, cx1 = Math.floor(Xw(w) / 16) + 1;
@@ -499,58 +500,110 @@ function renderMap() {
     ctx.fillRect(0, 0, w, h);
   }
 
-  // ---- 2. CHUNK GRID + COORDINATE LABELS -----------------------------
+  // ---- 2. ZONE-LATTICE GRID + COORDINATE LABELS ----------------------
+  // The grid is anchored to the zone-room lattice of the "anchor site" so
+  // that every mined-zone tile fills exactly one grid cell.
+  //
+  // Zone centers for a site (sx, sz) land at sx + gx*16, sz + gz*16 (integer
+  // gx/gz from gridOffset). The cell boundaries that frame each zone are
+  // therefore at sx ± 8 + n*16, i.e. the lattice phase is (sx - 8) in X and
+  // (sz - 8) in Z.  We call these phX / phZ.
+  //
+  // Anchor-site selection: prefer the site that currently has live mining;
+  // fall back to the site with the most recorded zones; fall back to the first
+  // site key.  A single active site is the overwhelmingly common case and this
+  // degenerates to "anchor to that site".  Zones from a *different* site with a
+  // different (sx mod 16, sz mod 16) phase will not be cell-aligned to this
+  // grid — that is accepted and noted in the zone-grid-phase memory.
+  let phX = 0, phZ = 0;
+  {
+    // Build a quick map: siteKey -> zone count
+    const siteCounts = {};
+    for (const [sk, zr] of Object.entries(zonesData)) {
+      if (!zr) continue;
+      const n = Object.keys(zr.done || {}).length +
+                Object.keys(zr.claims || {}).length +
+                Object.keys(zr.prog || {}).length;
+      siteCounts[sk] = (siteCounts[sk] || 0) + n;
+    }
+    // Find anchor: live-miner site first, else most zones, else first
+    let anchorKey = null;
+    for (const [, t] of turtles) {
+      const d = t.data;
+      if (d.role === "miner" && d.site) {
+        anchorKey = `${d.site.x},${d.site.y},${d.site.z}`;
+        break;
+      }
+    }
+    if (!anchorKey) {
+      let best = -1;
+      for (const [sk, n] of Object.entries(siteCounts)) {
+        if (n > best) { best = n; anchorKey = sk; }
+      }
+    }
+    if (!anchorKey) {
+      const keys = Object.keys(zonesData);
+      if (keys.length) anchorKey = keys[0];
+    }
+    if (anchorKey) {
+      const [asx, , asz] = anchorKey.split(",").map(Number);
+      // Grid lines at asx - 8 + n*16: phase offset from 0-anchored grid
+      phX = asx - ZONE_SPREAD / 2;
+      phZ = asz - ZONE_SPREAD / 2;
+    }
+    // If no site data at all, phX/phZ stay 0 and grid is chunk-aligned (fine).
+  }
+
   if (step > 6) {
-    // Determine label frequency: every chunk when zoomed in, every N chunks out
+    // Determine label frequency: every cell when zoomed in, every N cells out
     const labelEvery = step >= 60 ? 1 : step >= 20 ? 4 : step >= 8 ? 16 : 64;
 
-    // Regular grid lines
+    // Grid lines anchored to zone-lattice phase (phX, phZ).
+    // Starting screen position: find the first grid line >= left/top edge.
+    // X(phX) is the screen position of the phase origin; (X(phX) % step) gives
+    // the fractional offset, and we walk from there.
     ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
-    for (let gx = (X(0) % step + w * 2) % step; gx < w + step; gx += step) {
-      const worldX = Math.round(Xw(gx) / 16) * 16;
-      const isAxisX = worldX === 0;
-      if (isAxisX) continue; // drawn separately below
-      ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
+    for (let gx = (X(phX) % step + w * 2) % step; gx < w + step; gx += step) {
+      // True world X of this grid line: invert screen pos back to world, snap to lattice
+      const worldX = Math.round((Xw(gx) - phX) / 16) * 16 + phX;
+      if (worldX === 0) continue; // world-axis drawn separately below
       line(gx, 0, gx, h);
     }
-    for (let gy = (Y(0) % step + h * 2) % step; gy < h + step; gy += step) {
-      const worldZ = Math.round(Yw(gy) / 16) * 16;
-      const isAxisZ = worldZ === 0;
-      if (isAxisZ) continue;
-      ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
+    for (let gy = (Y(phZ) % step + h * 2) % step; gy < h + step; gy += step) {
+      const worldZ = Math.round((Yw(gy) - phZ) / 16) * 16 + phZ;
+      if (worldZ === 0) continue;
       line(0, gy, w, gy);
     }
 
-    // Axis highlights (X=0 and Z=0 lines)
+    // Axis highlights (X=0 and Z=0 world lines — not necessarily on the lattice)
     const axisX = X(0), axisZ = Y(0);
     ctx.strokeStyle = "rgba(63,185,80,0.25)"; ctx.lineWidth = 1.5;
     if (axisX >= 0 && axisX <= w) line(axisX, 0, axisX, h);
     ctx.strokeStyle = "rgba(88,166,255,0.2)"; ctx.lineWidth = 1.5;
     if (axisZ >= 0 && axisZ <= h) line(0, axisZ, w, axisZ);
 
-    // Coordinate labels on major grid lines
+    // Coordinate labels on major grid lines (real world values)
     if (step * labelEvery >= 16) {
       ctx.font = "9px ui-monospace, monospace";
       ctx.textBaseline = "top";
       // X labels along top edge
-      for (let gx = (X(0) % (step * labelEvery) + w * 4) % (step * labelEvery); gx < w; gx += step * labelEvery) {
-        const worldX = Math.round(Xw(gx) / 16 / labelEvery) * 16 * labelEvery;
+      for (let gx = (X(phX) % (step * labelEvery) + w * 4) % (step * labelEvery); gx < w; gx += step * labelEvery) {
+        const worldX = Math.round((Xw(gx) - phX) / 16 / labelEvery) * 16 * labelEvery + phX;
         if (gx < 2 || gx > w - 2) continue;
-        // halo
         ctx.fillStyle = "rgba(11,14,19,0.75)";
         ctx.fillRect(gx + 2, 2, 34, 12);
         ctx.fillStyle = worldX === 0 ? "rgba(63,185,80,0.9)" : "rgba(139,151,167,0.7)";
-        ctx.fillText("X" + worldX, gx + 3, 3);
+        ctx.fillText("X" + Math.round(worldX), gx + 3, 3);
       }
       // Z labels along left edge
       ctx.textBaseline = "middle";
-      for (let gy = (Y(0) % (step * labelEvery) + h * 4) % (step * labelEvery); gy < h; gy += step * labelEvery) {
-        const worldZ = Math.round(Yw(gy) / 16 / labelEvery) * 16 * labelEvery;
+      for (let gy = (Y(phZ) % (step * labelEvery) + h * 4) % (step * labelEvery); gy < h; gy += step * labelEvery) {
+        const worldZ = Math.round((Yw(gy) - phZ) / 16 / labelEvery) * 16 * labelEvery + phZ;
         if (gy < 8 || gy > h - 8) continue;
         ctx.fillStyle = "rgba(11,14,19,0.75)";
         ctx.fillRect(2, gy - 6, 34, 12);
         ctx.fillStyle = worldZ === 0 ? "rgba(88,166,255,0.9)" : "rgba(139,151,167,0.7)";
-        ctx.fillText("Z" + worldZ, 3, gy);
+        ctx.fillText("Z" + Math.round(worldZ), 3, gy);
       }
       ctx.textBaseline = "alphabetic";
     }
@@ -565,8 +618,10 @@ function renderMap() {
     if (d.role === "miner" && d.site && d.slot != null)
       liveZone.add(`${d.site.x},${d.site.y},${d.site.z}:${d.slot}`);
   }
-  const half = (ZONE_SPREAD / 2 - 1) * view.scale;  // small gap between cells
-  const cellPx = half * 2;
+  // cellPx: zone tile fills exactly one lattice cell (ZONE_SPREAD blocks wide).
+  // A 1px seam is subtracted in device-independent pixels so adjacent filled
+  // zones look like distinct cells rather than one solid block at high zoom.
+  const cellPx = ZONE_SPREAD * view.scale - 1;
 
   // Animated pulse phase for live zones (cheap: uses Date.now, stable per frame)
   const pulseT = (Date.now() % 2000) / 2000; // 0-1 cycling ~2s
@@ -580,6 +635,7 @@ function renderMap() {
     for (const k of Object.keys(zr.prog || {})) idxs.add(+k);
     for (const idx of idxs) {
       const p = zonePos(sk, idx);
+      const half = cellPx / 2;
       const zx = X(p.x) - half, zy = Y(p.z) - half;
       if (zx + cellPx < 0 || zx > w || zy + cellPx < 0 || zy > h) continue;
 
