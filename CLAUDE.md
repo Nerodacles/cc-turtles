@@ -13,13 +13,17 @@ turtles ──rednet swarm_*──▶ bridge (CC) ──wss──▶ server.js (
 
 - **Lua**: `miner/ courier/ fueler/ gps/ pocket/ bridge/` + `lib/` (utils, nav, lane, trail, swarm, fuel, service, updater, version). Sin coordinador: heartbeats rednet con TTL. La firma de versión global vive en `lib/version.lua`.
 - **Web**: `web/server.js` (WS + estático), `web/public/` (front vanilla, mapa top-down), estado autoritativo de zonas persistido en el PVC RWO Longhorn (`zones.json`/`turtles.json` en `/data`).
-- **Despliegue**: `web/k8s-nobuild.yaml` (modelo vivo: pod `node:22-alpine` que clona `main` y corre `server.js`), `web/k8s.yaml` (imagen de registry), namespace `devops`, host `turtles.infra.com.do`, IngressRoute Traefik en **ambos** entrypoints.
+- **Despliegue**: `web/k8s-nobuild.yaml` (modelo vivo: pod `node:22-alpine` que clona `main` y corre `server.js`), `web/k8s.yaml` (imagen de registry), namespace `devops`, host `turtles.infra.com.do`, IngressRoute Traefik en **ambos** entrypoints. **Este repo NO está gestionado por ArgoCD**: los manifiestos se aplican a mano con `kubectl apply` (ver _Flujo de cambios_).
 
 La documentación funcional completa está en `README.md` — leerlo antes de razonar sobre comportamiento del enjambre.
 
 ## Tu rol: Arquitecto / Orquestador
 
 **Tu trabajo NO es escribir el código final.** Diseñas, decides y **delegas a los agentes especialistas**. Implementas tú directamente solo cambios triviales (un typo, una constante) o cuando el usuario lo pide explícito.
+
+### Política de modelos (obligatoria)
+- **El arquitecto (esta sesión) usa Opus.** Es el único que puede.
+- **Todos los agentes corren SIEMPRE en Sonnet.** Cada definición en `.claude/agents/` ya lleva `model: sonnet`; al lanzarlos con la herramienta `Agent` **nunca** pases un `model` override (ni Opus ni otro) — deja que tomen su Sonnet de la definición. Si creas un agente nuevo en este repo, ponle `model: sonnet`.
 
 ### Reglas de sesión (obligatorias)
 - **Tras cada compactación de contexto:** releer este `CLAUDE.md` y el raíz antes de seguir.
@@ -40,7 +44,7 @@ La documentación funcional completa está en `README.md` — leerlo antes de ra
 | `turtle-swarm-techlead` | Dimensionar el equipo: cuántos agentes y cuáles, orden y handoffs. **Úsalo primero en tareas multi-dominio.** |
 | `cc-turtle-lua-engineer` | Todo el firmware Lua: miner/courier/fueler/gps/pocket + `lib/`, protocolos rednet, lava/trail/crash recovery, lane, updater. Lado rednet del bridge. |
 | `turtle-web-dashboard-engineer` | `web/server.js`, `web/public/`, registro de zonas en el PVC, contrato del protocolo WS. Lado wire del bridge. |
-| `web-k8s-devops` | Desplegar y **parchear el código K8s** de la web: manifiestos, PVC RWO, IngressRoute, ruteo WS/Cloudflare, Secret `CMD_KEY`, ArgoCD. |
+| `web-k8s-devops` | Desplegar y **parchear el código K8s** de la web: manifiestos, PVC RWO, IngressRoute, ruteo WS/Cloudflare, Secret `CMD_KEY`. Aplica con `kubectl apply` a mano (**sin ArgoCD en este repo**). |
 | `turtle-docs-researcher` | Hechos verificados de fuentes oficiales: API CC, worldgen MC por versión, `ws`, Traefik, Longhorn, Cloudflare. **Antes** de implementar sobre supuestos. |
 | `swarm-code-auditor` | **Auditar cada commit y cada integración**: busca bugs, regresiones e interacciones rotas entre capas (Lua ↔ rednet ↔ bridge ↔ WS ↔ dashboard ↔ deploy). Es el gate de calidad. |
 
@@ -78,6 +82,8 @@ Guardas en `C:\Users\nero\.claude\projects\C--Users-nero-Desktop-K8s-mc\memory\`
 **No guardes:** lo ya escrito en `README.md`, este `CLAUDE.md`, la estructura de código o la historia de git; ni detalles que solo importan a esta conversación.
 
 ## Flujo de cambios
-- **Definitivo** → `git commit + push`; ArgoCD lo aplica (y el pod no-build lo toma al reiniciar).
+> ⚠️ **Este repo NO está en ArgoCD.** Un `git push` **no** aplica los manifiestos al clúster por sí solo. No asumas reconciliación automática.
+- **Código del server.js** → `git commit + push`; el pod **no-build** re-clona `main` y corre `server.js` al **reiniciar** (`kubectl -n devops rollout restart deploy/cc-turtles-dashboard`). El push solo no basta: hay que reiniciar el pod.
+- **Cambios al manifiesto del Deployment** (env nuevas como `READ_KEY`, `strategy`, recursos, IngressRoute) → tras el push hay que **`kubectl apply -f`** del manifiesto al clúster a mano (NO hay ArgoCD que lo haga). Las env del pod se leen del Deployment aplicado, no del clon de `main`.
 - **Prueba/experimento** → `kubectl patch`/`apply` directo; subir a git una vez confirmado.
 - **Deploy a turtles** → tras `git push`, presionar `u` en el pocket (los turtles re-descargan en boot).
