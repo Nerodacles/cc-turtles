@@ -38,9 +38,30 @@ local STATUS_INTERVAL  = 5
 -- within 60 steps, so partial overlaps are never skipped.
 local EMPTY_CHECK_STEPS = 60
 
+-- ============================================================
+-- F2: AUTO-EXPANDING SITES
+-- Each site hosts up to MAX_ZONES_PER_SITE zone slots (0..cap-1).
+-- When a site's slots are full/done, miners roll to the next site on
+-- the same chebyshev-spiral grid, one level up from zones.
+--
+-- No-overlap proof (SITE_SPREAD = 96):
+--   maxRing(12) = 2  (slots 0..11 -> gridOffset(1..12); cell 12 is ring 2)
+--   farthest zone center from site = 2 * ZONE_SPREAD = 32 blocks
+--   zone room half-size = ROOM_SIZE/2 = 8 blocks
+--   farthest zone boundary from site = 32 + 8 = 40 blocks
+--   minimum safe SITE_SPREAD > 2 * 40 = 80 blocks
+--   96 > 80  -> adjacent site zone-grids NEVER overlap. QED.
+-- If MAX_ZONES_PER_SITE is changed, recompute: maxRing = ceil(sqrt(cap/4))
+-- conservatively, then SITE_SPREAD = 2*(maxRing*ZONE_SPREAD + ROOM_SIZE/2)+1.
+-- ============================================================
+local MAX_ZONES_PER_SITE = 12   -- cap for slot negotiation per site
+local MAX_SITES          = 9    -- hard ceiling; beyond this, go home/idle
+local SITE_SPREAD        = 96   -- site center-to-center distance (see proof)
+
 local PROTO_CMD     = "swarm_cmd"
 local PROTO_COURIER = "swarm_courier"
 local PROTO_SITE    = "swarm_site"
+local PROTO_HAZARD  = "swarm_hazard"   -- F3
 
 local HOME_FILE = "/home.json"
 
@@ -48,16 +69,20 @@ local HOME_FILE = "/home.json"
 -- STATE (persisted to /state.json)
 -- ============================================================
 local state = {
-    phase  = "goto",
-    site   = nil,   -- shared entry point (from the pocket)
-    slot   = nil,   -- my index among the miners at this site
-    shaft  = nil,   -- {x,z} my shaft column at the entry zone
-    center = nil,   -- {x,z} my room zone center below
-    topY   = nil,   -- surface Y at the shaft
-    depth  = 0,     -- blocks below topY (shaft + stacked levels)
-    mined  = {},
-    room   = { px = 0, pz = 0, facing = 0 },
+    phase      = "goto",
+    site       = nil,   -- shared entry point (current site center)
+    siteIndex  = 0,     -- F2: which site we are at (0 = origin from pocket)
+    slot       = nil,   -- my index among the miners at this site
+    shaft      = nil,   -- {x,z} my shaft column at the entry zone
+    center     = nil,   -- {x,z} my room zone center below
+    topY       = nil,   -- surface Y at the shaft
+    depth      = 0,     -- blocks below topY (shaft + stacked levels)
+    mined      = {},
+    room       = { px = 0, pz = 0, facing = 0 },
 }
+
+-- F3: last-broadcast position per hazard type (for dedup within 5 blocks)
+local lastHazardPos = {}  -- { lava_lake={x,y,z}, spawner={x,y,z}, cavern={x,y,z} }
 
 local stopFlag, pauseFlag, updateFlag = false, false, false
 local currentPhase   = "boot"
@@ -89,6 +114,47 @@ local function deadPos()
         y = (state.topY or MINING_Y) - (state.depth or 0),
         z = state.center.z + (r.pz or 0),
     }
+end
+
+-- ============================================================
+-- F3: HAZARD BROADCASTING
+-- ============================================================
+-- Best available position: GPS first, dead-reckoned fallback.
+local function hazardPos()
+    local x, y, z = gps.locate(2)
+    if x then return { x = x, y = y, z = z } end
+    return deadPos()
+end
+
+-- Broadcast a hazard if not already reported within 5 blocks of the
+-- last broadcast of the same type (dedup so a lava seam doesn't flood
+-- the wire on every Y level; caverns can span many rooms).
+local function broadcastHazard(hazardType)
+    local pos = hazardPos()
+    if not pos then return end  -- no position at all, skip
+    local last = lastHazardPos[hazardType]
+    if last then
+        local d = math.abs(pos.x - last.x)
+                + math.abs(pos.y - last.y)
+                + math.abs(pos.z - last.z)
+        if d <= 5 then return end  -- too close to last broadcast: suppress
+    end
+    lastHazardPos[hazardType] = pos
+    Swarm.bcast({
+        type   = "hazard",
+        hazard = hazardType,
+        pos    = pos,
+        miner  = os.getComputerID(),
+    }, PROTO_HAZARD)
+    print("[hazard] " .. hazardType .. " @ " .. pos.x .. "," .. pos.y .. "," .. pos.z)
+end
+
+-- Called wherever we inspect a block and find it is a spawner.
+-- isProtected() already guards the dig; this just fires the alert.
+local function checkSpawnerHazard(name)
+    if name == "minecraft:spawner" then
+        broadcastHazard("spawner")
+    end
 end
 
 -- Home persists across missions
@@ -204,6 +270,51 @@ local function gridOffset(k)
 end
 
 -- ============================================================
+-- F2: SITE GRID
+-- Site k center = origin + gridOffset(k) * SITE_SPREAD.
+-- gridOffset(0)=(0,0), then chebyshev spiral outward, same as zones.
+-- Every miner computes this from origin (/site.json at first 'm' press)
+-- + siteIndex, so all agree with no coordinator.
+-- ============================================================
+local siteOrigin = nil  -- loaded from /site.json once at boot (immutable)
+
+-- Compute the SURFACE entry point for site index k.
+local function siteCenter(k)
+    local gx, gz = gridOffset(k)
+    return {
+        x = siteOrigin.x + gx * SITE_SPREAD,
+        y = siteOrigin.y,
+        z = siteOrigin.z + gz * SITE_SPREAD,
+    }
+end
+
+-- Fly to site index k, update state.site + siteIndex + /site.json,
+-- save state. Reuses Nav.goTo (terrain-hugging, trail-journalled).
+-- After this call the miner is at the new site surface, ready to
+-- negotiate a slot and descend.
+local function flyToSite(k)
+    currentPhase = "goto"
+    local target = siteCenter(k)
+    print("[site] Flying to site " .. k .. " at " .. target.x .. "," .. target.z)
+    ensureOriented()
+    Nav.goTo({ x = target.x, y = target.y, z = target.z })
+    state.siteIndex = k
+    state.site      = target
+    state.slot      = nil   -- need fresh negotiation at the new site
+    state.shaft     = nil
+    state.center    = nil
+    state.topY      = nil
+    state.depth     = 0
+    state.phase     = "goto"  -- safe for crash-resume: goto re-flies to
+                              -- state.site; shaft/center filled by setZone
+                              -- (called by caller after we return)
+    -- Persist to /site.json so crash-resume returns here
+    Utils.writeJSON("/site.json", target)
+    Utils.saveState(state)
+    print("[site] Arrived at site " .. k)
+end
+
+-- ============================================================
 -- SLOT NEGOTIATION: announce on swarm_site, collect peers for 3s.
 -- Miners that already own a slot reply with it; the rest resolve
 -- by computer ID order. No central coordinator.
@@ -282,6 +393,12 @@ local function negotiateSlot()
         end
 
         if not contested then
+            -- F2: if every slot 0..cap-1 is taken the elected slot
+            -- overflows the cap -> this site is full, caller must roll.
+            if slot >= MAX_ZONES_PER_SITE then
+                print("[site] All " .. MAX_ZONES_PER_SITE .. " slots claimed - site full")
+                return nil  -- sentinel: roll to next site
+            end
             print("[site] Local slot " .. slot)
             return slot
         end
@@ -326,6 +443,44 @@ local function acquireZone(doneIdx)
         end
     end
     return nil
+end
+
+-- F2: Find and claim a slot at the current site, rolling to the next
+-- site if the current one is full, up to MAX_SITES.
+-- `doneIdx` is forwarded to acquireZone once (atomic mark-done+next).
+-- Returns (idx, level) or (nil, nil) when all sites exhausted.
+local function acquireSlotWithRoll(doneIdx)
+    while true do
+        -- Try server-authoritative first
+        local idx, level = acquireZone(doneIdx)
+        doneIdx = nil  -- only mark-done once
+        if idx ~= nil then
+            -- Server may grant idx >= cap if it is unaware of the new cap;
+            -- treat that exactly like a full site: roll.
+            if idx < MAX_ZONES_PER_SITE then
+                return idx, level
+            end
+            print("[site] Server granted idx " .. idx .. " >= cap " ..
+                  MAX_ZONES_PER_SITE .. " - treating as site full")
+        else
+            -- Decentralized fallback
+            idx = negotiateSlot()
+            if idx ~= nil then
+                return idx, nil  -- no level from peer negotiation
+            end
+        end
+
+        -- Site full: roll to next index
+        local nextK = (state.siteIndex or 0) + 1
+        if nextK >= MAX_SITES then
+            print("[site] All " .. MAX_SITES .. " sites exhausted - going home")
+            return nil, nil
+        end
+        print("[site] Site " .. (state.siteIndex or 0) .. " full - rolling to site " .. nextK)
+        Trail.clear()  -- start fresh trail for the new site flight
+        flyToSite(nextK)
+        -- After flyToSite the miner is at the new site: loop to negotiate there
+    end
 end
 
 -- Answer slot queries/claims (latecomers and claim-verifiers learn
@@ -701,6 +856,7 @@ local function descend()
             print("[guard] LAVA below at Y=" .. (state.topY - state.depth) ..
                   " - sealed, mining from here")
             Utils.seal(turtle.placeDown)
+            broadcastHazard("lava_lake")  -- F3: one broadcast per Y level, deduped
             return "lava"
         end
         if dOk and dB.name:find("computercraft") then
@@ -759,7 +915,10 @@ local function clearVert(inspect, dig, place)
         Utils.seal(place)
         return false
     end
-    if Utils.isProtected(b.name) then return false end
+    if Utils.isProtected(b.name) then
+        checkSpawnerHazard(b.name)  -- F3: alert on spawner (up/down)
+        return false
+    end
     -- dig() is a no-op on fluids (water can't be picked up) and air, so
     -- only count + record when it ACTUALLY removed a solid block. Without
     -- this, a flooded level inflates levelMined and the empty-skip never
@@ -797,6 +956,7 @@ local function roomStep(fast)
                 if turtleWait % 45 == 0 then Utils.jiggle("ahead") end
                 os.sleep(1)
             elseif ok and Utils.isProtected(b.name) then
+                checkSpawnerHazard(b.name)  -- F3: alert on spawner (front)
                 return "blocked"
             elseif not turtle.detect() then
                 break
@@ -958,6 +1118,8 @@ end
 -- tunnel level, return to the shaft junction, mark the zone done,
 -- acquire a FRESH zone and tunnel out to it - continuous expansion,
 -- all at the Y=MINING_Y tunnel level (the entry shaft is untouched).
+-- F2: when all zones in the current site are exhausted, rolls to the
+-- next site on the deterministic grid (up to MAX_SITES).
 -- Returns true if a new zone was acquired and reached.
 -- ============================================================
 local function relocateToNewZone()
@@ -970,18 +1132,23 @@ local function relocateToNewZone()
     end
     walkTo(state.shaft.x, state.shaft.z, "zx")  -- back to the hub
 
-    -- atomic: mark this zone done AND get the next free one
-    local oldSlot = state.slot
-    local idx, level = acquireZone(state.slot)
-    if idx == nil then
-        -- no server: best-effort. negotiateSlot ranks among peers and
-        -- our own just-vacated slot reads as free, so it can hand back
-        -- the SAME exhausted zone -> tight re-mine loop. Force forward.
-        idx = negotiateSlot()
-        if idx == oldSlot then idx = oldSlot + 1 end
-    end
-    if idx == nil then return false end
+    -- F2: acquireSlotWithRoll handles server + decentralized fallback and
+    -- site-roll if needed. Passes our just-finished zone as doneIdx so the
+    -- server marks it done atomically before granting the next one.
+    local idx, level = acquireSlotWithRoll(state.slot)
+    if idx == nil then return false end  -- all sites exhausted
+
+    -- If we rolled to a new site, setZone will use the updated state.site.
     setZone(idx)
+
+    -- Detect a site roll: flyToSite resets topY=nil (no terrain settled yet).
+    -- In that case we need the full goto -> settle terrain -> descend path;
+    -- the outer repeat loop in mission() handles it when phase is "goto".
+    if state.topY == nil then
+        state.phase = "goto"
+        Utils.saveState(state)
+        return true
+    end
 
     currentPhase = "tunnel"
     if not walkTo(state.center.x, state.center.z, "xz") then
@@ -1129,6 +1296,33 @@ local function mission()
         return
     end
 
+    -- F2: load the ORIGIN site (the 'm'-press point). This is immutable for
+    -- the lifetime of the swarm; all site offsets are relative to it.
+    -- On crash-resume the origin is the original /site.json from the pocket.
+    -- After a site-roll, /site.json holds the ROLLED site's coordinates so
+    -- crash-resume returns to the correct site - but we also stash the true
+    -- origin in state.siteOrigin so we can recompute any site index.
+    if not state.siteOrigin then
+        -- First boot or legacy state: origin = the site the pocket set.
+        -- Backcompat: state.siteIndex defaults to 0 (origin site).
+        local rawOrigin = Utils.readJSON("/site.json")
+        if rawOrigin then
+            state.siteOrigin = {
+                x = math.floor(rawOrigin.x),
+                y = math.floor(rawOrigin.y),
+                z = math.floor(rawOrigin.z),
+            }
+        else
+            state.siteOrigin = {
+                x = math.floor(state.site.x),
+                y = math.floor(state.site.y),
+                z = math.floor(state.site.z),
+            }
+        end
+        state.siteIndex = state.siteIndex or 0
+    end
+    siteOrigin = state.siteOrigin  -- expose to module-level helpers
+
     -- HEAL legacy fractional coordinates (old pockets broadcast the
     -- player's float position): integer-walking turtles oscillate
     -- around a fractional target forever
@@ -1149,11 +1343,19 @@ local function mission()
         print("[init] Home saved: " .. home.x .. "," .. home.y .. "," .. home.z)
     end
     if not state.slot then
-        -- fresh: ask the server, else decentralized fallback. The grant
-        -- may carry a resume layer (this zone was mined deeper before a
-        -- wipe/replace) - stash it; the descend phase drops to it.
-        local idx, level = acquireZone()
-        if idx == nil then idx = negotiateSlot() end
+        -- F2: acquireSlotWithRoll: server-authoritative first, then
+        -- decentralized fallback; rolls to the next site if full.
+        -- The grant may carry a resume layer (this zone was mined deeper
+        -- before a wipe/replace) - stash it; the descend phase drops to it.
+        local idx, level = acquireSlotWithRoll(nil)
+        if idx == nil then
+            -- All sites exhausted on very first boot: unusual but possible
+            -- if the swarm already filled everything. Go idle.
+            print("[error] All sites exhausted - going idle")
+            state.phase = "return"
+            Utils.saveState(state)
+            return
+        end
         setZone(idx)
         state.resumeLevel = level
         Utils.saveState(state)
@@ -1163,8 +1365,20 @@ local function mission()
     -- take the zone - a rare, non-destructive overlap that the
     -- empty-skip + jiggle resolve on their own.)
 
+    -- F2: outer loop re-enters goto/descend/mining after a site roll.
+    -- On first boot or crash-resume this runs exactly once (normal path).
+    -- After a roll, relocateToNewZone() sets phase="goto" and breaks the
+    -- inner while-mining loop; we loop back here and descend the new site.
+    repeat
+
     if state.phase == "goto" then
         currentPhase = "goto"
+        -- Crash-recovery guard: if flyToSite saved phase="goto" but the
+        -- turtle crashed before setZone ran, shaft is nil. Derive it from
+        -- site (setZone always sets shaft = site x/z) so we can still fly.
+        if not state.shaft then
+            state.shaft = { x = state.site.x, z = state.site.z }
+        end
         -- Leftover cargo from an aborted run (emergency home, failed
         -- unload)? hand it over BEFORE flying out with a dirty inventory
         if Utils.hasCargo() then
@@ -1248,7 +1462,10 @@ local function mission()
     -- mid-service-trip - NOT at the center mineRoom assumes. Re-establish
     -- the exact center via GPS before the dead-reckoning room logic runs.
     -- (Graceful update reboots already happen at center -> this no-ops.)
-    if bootPhase == "mining" then
+    -- Only applies on the FIRST pass of the outer loop (bootPhase is the
+    -- persisted phase at boot; after a site roll we're already positioned).
+    if bootPhase == "mining" and state.phase == "mining" then
+        bootPhase = nil  -- consume: do not re-fire on subsequent site rolls
         print("[resume] Re-centering in the zone...")
         ensureOriented()
         walkTo(state.center.x, state.center.z, "xz")  -- center column, current Y
@@ -1307,12 +1524,16 @@ local function mission()
                 print("[room] Lava sealed at this level - trying the next one")
             elseif result == "empty" then
                 print("[room] Level already mined out - skipping down")
+                broadcastHazard("cavern")  -- F3: zero-block level = cavern
             end
             local nextY = state.topY - state.depth - LEVEL_STEP
             if not stopFlag and nextY >= MIN_Y and descendLevel() then
                 print("[room] Next level: Y=" .. (state.topY - state.depth))
             elseif not stopFlag and relocateToNewZone() then
-                -- zone exhausted -> moved to a fresh one, keep mining
+                -- F2: zone exhausted -> moved to a fresh zone (same site or
+                -- rolled to next site). If rolled, state.phase=="goto" and
+                -- we break out to let mission() re-enter the goto/descend path.
+                if state.phase ~= "mining" then break end
                 print("[room] Zone done - relocated to a fresh zone")
             else
                 print("[room] No more zones (or stop) - heading home")
@@ -1335,6 +1556,10 @@ local function mission()
         end
         Utils.saveState(state)
     end
+
+    -- End of F2 outer loop: continue if we rolled to a new site (goto),
+    -- exit when phase is "return" (or anything that is not "goto").
+    until state.phase ~= "goto" or stopFlag
 
     if state.phase == "return" then
         goHome()

@@ -71,6 +71,22 @@ local function pumpZones(ws)
     end
 end
 
+-- F3: Forward hazard broadcasts to the dashboard.
+-- KEYED: validate before forwarding so a rogue turtle can't flood the
+-- dashboard with fake hazard data. Separate pump = separate protocol
+-- receive so pumpRednet's status filter doesn't swallow swarm_hazard.
+local function pumpHazards(ws)
+    while true do
+        local id, msg = rednet.receive("swarm_hazard")
+        if Swarm.ok(msg) and msg.hazard then
+            local ok = pcall(ws.send, textutils.serializeJSON({
+                type = "hazard", id = id, data = msg,
+            }))
+            if not ok then error("ws send failed", 0) end
+        end
+    end
+end
+
 -- Forward dashboard commands + relay server zone grants
 local function pumpWebsocket(ws)
     while true do
@@ -100,7 +116,8 @@ while true do
         pcall(parallel.waitForAny,
             function() pumpRednet(ws) end,
             function() pumpZones(ws) end,
-            function() pumpWebsocket(ws) end)
+            function() pumpWebsocket(ws) end,
+            function() pumpHazards(ws) end)
         pcall(ws.close)
         print("[bridge] Disconnected - retrying in 3s")
     end
