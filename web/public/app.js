@@ -748,13 +748,15 @@ function renderMap() {
     ctx.globalAlpha = 1;
   }
 
-  // ---- 6. TURTLE TRAILS (client-side ring buffer) --------------------
+  // ---- 6. TURTLE TRAILS (client-side ring buffer, = recent dig path) ----
+  // Each line segment is slightly thicker and more opaque than before so
+  // it reads clearly as "where this miner has been digging".
   for (const [id, t] of pts) {
     const trail = trailBufs.get(id);
     if (!trail || trail.len < 2) continue;
     const c = roleColor(t.data.role);
     // Draw oldest→newest as a fading polyline
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.8;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     // Walk the ring buffer in chronological order
@@ -765,46 +767,111 @@ function renderMap() {
       if (!pt) continue;
       const px = X(pt.x), py = Y(pt.z);
       if (prevPx != null) {
-        const alpha = (i / trail.len) * 0.45; // fades from near-zero at tail to 0.45 at head
+        // Fade from ~0 at oldest to 0.6 at newest (was 0.45) — more visible dig path
+        const alpha = (i / trail.len) * 0.6;
         ctx.strokeStyle = hexToRgba(c, alpha);
         ctx.beginPath(); ctx.moveTo(prevPx, prevPy); ctx.lineTo(px, py); ctx.stroke();
       }
       prevPx = px; prevPy = py;
     }
+    ctx.lineWidth = 1; // reset
+  }
+
+  // ---- 6b. ASSIGNMENT LINKS: faint connector from each live miner to its zone center ----
+  // A miner may be outside its zone tile (shaft transit or vein chase) — the line
+  // makes the assignment unambiguous even when the dot is far from the box.
+  // Only drawn for miners that report both d.site and d.slot.
+  // Culled when both endpoints are off-screen.
+  {
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.lineCap = "round";
+    ctx.setLineDash([3, 4]);
+    for (const [id, t] of pts) {
+      const d = t.data;
+      if (d.role !== "miner" || !d.site || d.slot == null) continue;
+      const p = d.pos;
+      const px = X(p.x), py = Y(p.z);
+      const sk = `${d.site.x},${d.site.y},${d.site.z}`;
+      const zp = zonePos(sk, d.slot);
+      const zx = X(zp.x), zy = Y(zp.z);
+      // Cull: skip if both endpoints are outside the viewport (with margin)
+      const margin = 20;
+      const turtleOff = px < -margin || px > w + margin || py < -margin || py > h + margin;
+      const zoneOff   = zx < -margin || zx > w + margin || zy < -margin || zy > h + margin;
+      if (turtleOff && zoneOff) continue;
+      const c = roleColor(d.role);
+      ctx.strokeStyle = hexToRgba(c, 0.22);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(zx, zy); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   // ---- 7. LIVE TURTLES -----------------------------------------------
   const now = Date.now();
+  const SHAFT_RADIUS = ZONE_SPREAD / 2; // blocks; within this XZ distance from site center = shaft transit
   for (const [id, t] of pts) {
     const d = t.data, p = d.pos;
     const px = X(p.x), py = Y(p.z);
     const stale = now - t.last > STALE_MS;
     const c = roleColor(d.role);
 
+    // Determine if this miner is in the shared shaft (XZ near site center)
+    let inShaft = false;
+    if (d.role === "miner" && d.site) {
+      const dx = Math.abs(p.x - d.site.x);
+      const dz = Math.abs(p.z - d.site.z);
+      inShaft = dx <= SHAFT_RADIUS && dz <= SHAFT_RADIUS;
+    }
+
     ctx.globalAlpha = stale ? 0.4 : 1;
 
-    // Soft shadow behind the dot
-    ctx.shadowColor = "rgba(0,0,0,0.7)";
-    ctx.shadowBlur = 6;
-    ctx.fillStyle = c;
-    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
+    if (inShaft) {
+      // Shaft-transit marker: hollow ring (no filled dot) so the center cluster
+      // reads as "in the shaft," not "out of bounds."
+      ctx.shadowColor = "rgba(0,0,0,0.7)";
+      ctx.shadowBlur = 6;
+      // Outer hollow ring
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.stroke();
+      // Second inner dashed ring to suggest vertical motion
+      ctx.setLineDash([2, 2]);
+      ctx.strokeStyle = hexToRgba(c, 0.55);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
+      ctx.lineWidth = 1;
+    } else {
+      // Normal filled dot
+      ctx.shadowColor = "rgba(0,0,0,0.7)";
+      ctx.shadowBlur = 6;
+      ctx.fillStyle = c;
+      ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
 
-    // Dark inner pupil
-    ctx.fillStyle = "#080b10";
-    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+      // Dark inner pupil
+      ctx.fillStyle = "#080b10";
+      ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+    }
 
     ctx.globalAlpha = 1;
 
-    // Label with text halo for legibility
-    const label = `${d.label || ("#" + id)} y${p.y}`;
+    // Label with text halo for legibility.
+    // Shaft-transiting miners get a "(shaft)" suffix so the center cluster reads clearly.
+    const suffix = inShaft ? " (shaft)" : "";
+    const label = `${d.label || ("#" + id)} y${p.y}${suffix}`;
     ctx.font = "11px ui-monospace, monospace";
     ctx.textBaseline = "middle";
+    ctx.globalAlpha = stale ? 0.4 : 1;
     ctx.fillStyle = "rgba(8,11,16,0.8)";
     ctx.fillText(label, px + 9, py + 1);
-    ctx.fillStyle = stale ? "#6b7686" : "#c8d3df";
+    ctx.fillStyle = stale ? "#6b7686" : (inShaft ? hexToRgba(c, 0.75) : "#c8d3df");
     ctx.fillText(label, px + 8, py);
     ctx.textBaseline = "alphabetic";
+    ctx.globalAlpha = 1;
   }
 
   // ---- 8. ORIGIN MARKER (0,0) ----------------------------------------
@@ -825,6 +892,30 @@ function renderMap() {
     ctx.fillStyle = "rgba(63,185,80,0.8)"; ctx.fillText("0,0", ox0 + 7, oz0 + 3);
     ctx.textBaseline = "alphabetic";
     ctx.globalAlpha = 1;
+  }
+
+  // ---- 9. MAP LEGEND (bottom-left corner of canvas) -----------------
+  // Small key so the visual annotations are self-explaining without opening docs.
+  {
+    const lx = 8, ly = h - 8;
+    ctx.save();
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.textBaseline = "alphabetic";
+
+    const items = [
+      { col: "rgba(139,151,167,0.55)", text: "-- -  assignment to zone" },
+      { col: "rgba(63,185,80,0.55)",   text: "trail = recent dig path" },
+      { col: "rgba(139,151,167,0.55)", text: "○  shaft transit" },
+    ];
+    const lineH = 13;
+    for (let i = 0; i < items.length; i++) {
+      const iy = ly - (items.length - 1 - i) * lineH;
+      ctx.fillStyle = "rgba(8,11,16,0.65)";
+      ctx.fillRect(lx - 1, iy - 10, 168, 12);
+      ctx.fillStyle = items[i].col;
+      ctx.fillText(items[i].text, lx, iy);
+    }
+    ctx.restore();
   }
 
   // Update HTML overlay (scale bar)
