@@ -30,29 +30,46 @@ const READ_KEY = process.env.READ_KEY || "";
 
 // ---- F5: WEBHOOK CONFIG ---------------------------------------------
 // WEBHOOK_URL: Discord-compatible HTTPS POST endpoint. Absent = no-op.
-// WEBHOOK_STALE_MS: silence before "offline" alert (default 5min).
+// WEBHOOK_STALE_MS: silence before "offline" alert (default 10min).
 // WEBHOOK_FUEL_THRESHOLD: absolute fuel below which "fuel critical" fires.
+// STUCK_MS: how long a miner must be motionless (phase=mining) before alert (default 8min).
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
-const WEBHOOK_STALE_MS = parseInt(process.env.WEBHOOK_STALE_MS || "300000", 10);
+const WEBHOOK_STALE_MS = parseInt(process.env.WEBHOOK_STALE_MS || "600000", 10);
 const WEBHOOK_FUEL_THRESHOLD = parseInt(process.env.WEBHOOK_FUEL_THRESHOLD || "500", 10);
-// Warm-up grace: suppress offline alerts for 90s after process start.
+const STUCK_MS = parseInt(process.env.STUCK_MS || "480000", 10);
+// Warm-up grace: suppress offline/stuck/swarm-idle alerts for 90s after process start.
 const startTs = Date.now();
 const WARMUP_GRACE_MS = 90000;
 // Per-turtle webhook state. Never log or broadcast these.
-// alerted: offline alert has fired; re-arms when turtle comes back.
-// fuelAlerted: fuel-critical alert fired; re-arms when fuel >= threshold+200.
-// lastFuel: last known fuel to detect crossing.
-const webhookState = new Map(); // id -> { alerted:bool, fuelAlerted:bool, lastFuel:number|null }
-// Diamond dedup: "x,y,z" -> timestamp, block within ~3 blocks per 60s.
-const diamondSeen = new Map(); // posKey -> ts
-const DIAMOND_DEDUP_MS = 60000;
-const DIAMOND_DEDUP_RADIUS = 3;
+// alerted:      offline alert has fired; re-arms when turtle comes back.
+// fuelAlerted:  fuel-critical alert fired; re-arms when fuel >= threshold+200.
+// stranded:     0-fuel alert fired; re-arms when fuel > 0.
+// lastFuel:     last known fuel to detect crossing.
+// stuckAlerted: stuck-miner alert fired; re-arms when pos/level changes or phase leaves mining.
+// stuckPos:     { x, z, level, ts } — baseline for stuck detection; updated on movement.
+const webhookState = new Map();
+// id -> { alerted:bool, fuelAlerted:bool, stranded:bool, lastFuel:number|null,
+//         stuckAlerted:bool, stuckPos:{x,z,level,ts}|null }
+
+// Rare-ore dedup: posKey -> ts; fires for diamond, ancient_debris, emerald.
+const RARE_ORES = new Set(["diamond", "ancient_debris", "emerald"]);
+const rareSeen = new Map(); // posKey -> ts
+const RARE_DEDUP_MS = 60000;
+const RARE_DEDUP_RADIUS = 3;
 // Site-finished dedup: siteKey -> bool (fire once, reset only on zones reset).
 const siteFinishedAlerted = new Set();
+// Swarm-idle tracking: have we ever seen a mining phase since boot?
+let swarmEverMined = false;
+// swarmIdleAlerted: true while 0 miners mining (alert fired); re-arms when any miner resumes.
+let swarmIdleAlerted = false;
 
 function wState(id) {
   let s = webhookState.get(id);
-  if (!s) { s = { alerted: false, fuelAlerted: false, lastFuel: null }; webhookState.set(id, s); }
+  if (!s) {
+    s = { alerted: false, fuelAlerted: false, stranded: false, lastFuel: null,
+          stuckAlerted: false, stuckPos: null };
+    webhookState.set(id, s);
+  }
   return s;
 }
 
@@ -314,9 +331,9 @@ function checkSiteFinished(sk) {
   sendWebhook(`Site ${sk} finished — all ${maxIdx + 1} zones mined.`);
 }
 
-// F5: diamond dedup helper — snap position to 3-block grid for dedup.
-function diamondDedupKey(x, y, z) {
-  return `${Math.round(x / DIAMOND_DEDUP_RADIUS)},${Math.round(y / DIAMOND_DEDUP_RADIUS)},${Math.round(z / DIAMOND_DEDUP_RADIUS)}`;
+// F5: rare-ore dedup helper — snap position to 3-block grid for dedup.
+function rareDedupKey(x, y, z) {
+  return `${Math.round(x / RARE_DEDUP_RADIUS)},${Math.round(y / RARE_DEDUP_RADIUS)},${Math.round(z / RARE_DEDUP_RADIUS)}`;
 }
 
 // ---- static file server --------------------------------------------
@@ -504,14 +521,14 @@ wss.on("connection", (ws) => {
           tallyOre(o.n);
           broadcastStats();
           saveStats();
-          // F5: diamond alert — dedup by position within ~3 blocks per 60s
-          if (WEBHOOK_URL && o.n === "diamond") {
-            const dk = diamondDedupKey(o.x, o.y, o.z);
-            const last = diamondSeen.get(dk) || 0;
+          // F5: rare-ore alert (diamond / ancient_debris / emerald) — dedup by position ~3 blocks per 60s
+          if (WEBHOOK_URL && RARE_ORES.has(o.n)) {
+            const rk = rareDedupKey(o.x, o.y, o.z) + ":" + o.n; // per-ore dedup key
+            const last = rareSeen.get(rk) || 0;
             const now2 = Date.now();
-            if (now2 - last > DIAMOND_DEDUP_MS) {
-              diamondSeen.set(dk, now2);
-              sendWebhook(`Diamond found at X${o.x} Y${o.y} Z${o.z}!`);
+            if (now2 - last > RARE_DEDUP_MS) {
+              rareSeen.set(rk, now2);
+              sendWebhook(`🟢 Rare find: ${o.n} at X${o.x} Y${o.y} Z${o.z}`);
             }
           }
         }
@@ -544,23 +561,64 @@ wss.on("connection", (ws) => {
         if (d.role)  rec.role  = d.role;
         rec.ts = Date.now();
         saveTurtles(); }
-      // F5: fuel-critical alert
+      // F5: fuel alerts (stranded @ 0 pre-empts fuel-critical)
       if (WEBHOOK_URL && msg.data.fuel != null && typeof msg.data.fuel === "number") {
         const ws2 = wState(msg.id);
         const fuel = msg.data.fuel;
-        if (!ws2.fuelAlerted && fuel < WEBHOOK_FUEL_THRESHOLD) {
-          ws2.fuelAlerted = true;
-          ws2.lastFuel = fuel;
-          const label = msg.data.label || ("#" + msg.id);
-          sendWebhook(`Fuel critical: ${label} has ${fuel} fuel (threshold: ${WEBHOOK_FUEL_THRESHOLD}).`);
-        } else if (ws2.fuelAlerted && fuel >= WEBHOOK_FUEL_THRESHOLD + 200) {
-          // Re-arm: turtle has been refueled
-          ws2.fuelAlerted = false;
+        const label = msg.data.label || ("#" + msg.id);
+        if (fuel === 0) {
+          // STRANDED: fire once; suppress generic fuel-critical for the same turtle.
+          if (!ws2.stranded) {
+            ws2.stranded = true;
+            ws2.fuelAlerted = true; // pre-empt generic alert so it doesn't double-fire
+            const levelStr = msg.data.level != null ? ` (Y${msg.data.level})` : "";
+            sendWebhook(`🔴 STRANDED: ${label} at 0 fuel${levelStr} — awaiting rescue.`);
+          }
+        } else {
+          // Re-arm stranded when fuel > 0
+          if (ws2.stranded) ws2.stranded = false;
+          // Generic fuel-critical (only if not stranded)
+          if (!ws2.fuelAlerted && fuel < WEBHOOK_FUEL_THRESHOLD) {
+            ws2.fuelAlerted = true;
+            const levelStr = msg.data.level != null ? ` (Y${msg.data.level})` : "";
+            sendWebhook(`⚠️ Fuel critical: ${label} has ${fuel} fuel (threshold: ${WEBHOOK_FUEL_THRESHOLD})${levelStr}.`);
+          } else if (ws2.fuelAlerted && fuel >= WEBHOOK_FUEL_THRESHOLD + 200) {
+            // Re-arm: turtle has been refueled
+            ws2.fuelAlerted = false;
+          }
         }
         ws2.lastFuel = fuel;
       }
       // Re-arm offline alert when turtle comes back online
       wState(msg.id).alerted = false;
+      // F5: stuck-miner position tracking — update baseline when pos/level/phase changes
+      if (WEBHOOK_URL && msg.data.role === "miner") {
+        const ws3 = wState(msg.id);
+        const cx = msg.data.pos ? msg.data.pos.x : null;
+        const cz = msg.data.pos ? msg.data.pos.z : null;
+        const clevel = msg.data.level != null ? msg.data.level : null;
+        const cphase = msg.data.phase || null;
+        const sp = ws3.stuckPos;
+        // moved is true if no baseline yet OR pos/level changed — handles first heartbeat too
+        const moved = !sp || sp.x !== cx || sp.z !== cz || sp.level !== clevel;
+        const inMiningPhase = cphase === "mining";
+        if (!inMiningPhase) {
+          // Left mining — re-arm stuck alert and reset baseline
+          if (ws3.stuckAlerted) ws3.stuckAlerted = false;
+          ws3.stuckPos = null;
+        } else if (moved) {
+          // Still mining, but moved (or first heartbeat in mining) — re-arm and set baseline
+          ws3.stuckAlerted = false;
+          ws3.stuckPos = { x: cx, z: cz, level: clevel, ts: Date.now() };
+        }
+        // else: phase=mining, position unchanged — baseline holds, stuck clock keeps running
+        // Swarm-idle tracking: mark that at least one miner has been mining since boot
+        if (inMiningPhase) {
+          swarmEverMined = true;
+          // If idle alert was armed, re-arm it now that mining resumed
+          if (swarmIdleAlerted) swarmIdleAlerted = false;
+        }
+      }
       broadcast(browsers, { type: "status", id: msg.id, data: msg.data });
       return;
     }
@@ -622,7 +680,7 @@ wss.on("connection", (ws) => {
   ws.on("error", () => { browsers.delete(ws); bridges.delete(ws); });
 });
 
-// ---- prune stale turtles + tell browsers + F5 offline alerts -------
+// ---- prune stale turtles + tell browsers + F5 offline/stuck/swarm-idle alerts -------
 setInterval(() => {
   const now = Date.now();
   const inGrace = now - startTs < WARMUP_GRACE_MS;
@@ -633,10 +691,11 @@ setInterval(() => {
       broadcast(browsers, { type: "gone", id });
     }
   }
-  // 2. F5: Offline alerts — scanned from lastKnown so the WEBHOOK_STALE_MS
-  //    threshold is independent of STALE_MS (which is usually much shorter).
-  //    Fires once per offline event; re-armed when the turtle sends a heartbeat.
+
   if (WEBHOOK_URL && !inGrace) {
+    // 2. F5: Offline alerts — scanned from lastKnown so the WEBHOOK_STALE_MS
+    //    threshold is independent of STALE_MS (which is usually much shorter).
+    //    Fires once per offline event; re-armed when the turtle sends a heartbeat.
     for (const [id, rec] of Object.entries(lastKnown)) {
       // Only alert for turtles that are currently offline (not in turtles map)
       if (turtles.has(+id)) continue;
@@ -647,13 +706,59 @@ setInterval(() => {
       if (ws2.alerted) continue;
       ws2.alerted = true;
       const label = rec.label || ("#" + id);
-      sendWebhook(`Turtle ${label} has gone offline (no heartbeat for ${Math.round(silentMs / 60000)}m).`);
+      sendWebhook(`🔴 Turtle ${label} has gone offline (no heartbeat for ${Math.round(silentMs / 60000)}m).`);
+    }
+
+    // 3. F5: Stuck-miner alerts — live miner (heartbeating) in phase=mining whose
+    //    position (x,z) and level (Y) have not changed for STUCK_MS.
+    for (const [id, t] of turtles) {
+      if (t.data.role !== "miner") continue;
+      if (t.data.phase !== "mining") continue;
+      const ws3 = wState(id);
+      if (ws3.stuckAlerted) continue;
+      const sp = ws3.stuckPos;
+      if (!sp) continue;
+      if (now - sp.ts < STUCK_MS) continue;
+      ws3.stuckAlerted = true;
+      const label = t.data.label || ("#" + id);
+      const px = sp.x != null ? ` X${sp.x}` : "";
+      const pz = sp.z != null ? ` Z${sp.z}` : "";
+      const py = sp.level != null ? ` Y${sp.level}` : "";
+      const minStr = Math.round(STUCK_MS / 60000);
+      sendWebhook(`🔴 Miner ${label} stuck at${px}${py}${pz} (no progress ${minStr}m, still 'mining').`);
+    }
+
+    // 4. F5: Swarm-idle alert — transitions from ≥1 miner actively mining to 0.
+    //    Only fires if we previously observed at least one mining phase since boot.
+    if (swarmEverMined) {
+      let anyMining = false;
+      for (const [, t] of turtles) {
+        if (t.data.role === "miner" && t.data.phase === "mining") { anyMining = true; break; }
+      }
+      // Are there any LIVE miners at all? Check the turtles map only — lastKnown
+      // is persistent (survives restarts) and would keep anyMinerKnown true even
+      // when every miner has gone offline, causing swarm-idle to co-fire with the
+      // offline alerts. "Idle" means live miners present but none mining; a dead
+      // swarm is covered by offline alerts, not swarm-idle.
+      let anyMinerKnown = false;
+      for (const [, t] of turtles) {
+        if (t.data.role === "miner") { anyMinerKnown = true; break; }
+      }
+      if (anyMinerKnown && !anyMining && !swarmIdleAlerted) {
+        swarmIdleAlerted = true;
+        sendWebhook("🟢 Swarm idle — no miner is actively mining.");
+      }
     }
   }
-  // 3. Prune old diamond dedup entries
+
+  // 5. Prune old rare-ore dedup entries and webhookState for evicted turtles
   if (WEBHOOK_URL) {
-    for (const [k, ts] of diamondSeen) {
-      if (now - ts > DIAMOND_DEDUP_MS * 2) diamondSeen.delete(k);
+    for (const [k, ts] of rareSeen) {
+      if (now - ts > RARE_DEDUP_MS * 2) rareSeen.delete(k);
+    }
+    // Prune webhookState for turtles no longer in lastKnown (fully gone)
+    for (const [id] of webhookState) {
+      if (!lastKnown[id] && !turtles.has(id)) webhookState.delete(id);
     }
   }
 }, 5000);

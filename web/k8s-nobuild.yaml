@@ -86,6 +86,10 @@ spec:
                   optional: true
             # Absolute fuel count below which "fuel critical" fires (default 500).
             - { name: WEBHOOK_FUEL_THRESHOLD, value: "500" }
+            # Silence before "offline" alert fires (default 10 min).
+            - { name: WEBHOOK_STALE_MS, value: "600000" }
+            # Silence before "stuck miner" alert fires (default 8 min).
+            - { name: STUCK_MS, value: "480000" }
           ports: [{ containerPort: 8080 }]
           readinessProbe:
             tcpSocket: { port: 8080 }
