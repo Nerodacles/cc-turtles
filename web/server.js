@@ -489,7 +489,9 @@ function turtleList() {
 }
 
 const server = http.createServer((req, res) => {
-  let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+  let urlPath;
+  try { urlPath = decodeURIComponent((req.url || "/").split("?")[0]); }
+  catch { res.writeHead(400); return res.end("bad request"); }
 
   // GET /api/health — unauthenticated; for liveness probes.
   if (urlPath === "/api/health") {
@@ -604,6 +606,20 @@ const server = http.createServer((req, res) => {
 });
 
 // ---- websocket hub --------------------------------------------------
+// safeCmpWsKey: timing-safe comparison for the WS command key.
+// Mirrors the safeCmpCmd logic used in /api/logs. Returns false for any
+// non-string or undefined supplied value. When CMD_KEY is unset (open),
+// always returns true so every caller can use the same gate idiom:
+//   if (CMD_KEY && !safeCmpWsKey(msg.key)) { ... reject ... }
+const _cmdKeyBuf = CMD_KEY ? Buffer.from(CMD_KEY, "utf8") : null;
+function safeCmpWsKey(supplied) {
+  if (!_cmdKeyBuf) return true; // no key set — open; callers still gate on CMD_KEY
+  if (typeof supplied !== "string" || !supplied) return false;
+  const s = Buffer.from(supplied, "utf8");
+  if (s.length !== _cmdKeyBuf.length) return false;
+  return crypto.timingSafeEqual(s, _cmdKeyBuf);
+}
+
 const wss = new WebSocketServer({ server });
 const browsers = new Set();
 const bridges = new Set();
@@ -631,10 +647,14 @@ wss.on("connection", (ws) => {
         // Wake-edge: if we were asleep and a bridge just connected, start the
         // wake grace window and re-arm all per-turtle/swarm alert flags so
         // the sleep gap doesn't create a backlog storm.
+        // If the fleet was still active (bridge flap, not a real sleep), we
+        // still need to push an explicit asleep:false so browsers that saw the
+        // disconnect's asleep:true banner can clear it immediately.
         if (!bridgeConnected) {
           bridgeConnected = true;
           const wasAsleep = Date.now() - lastHeartbeatTs > WORLD_SLEEP_MS;
           if (wasAsleep) onWakeEdge();
+          else broadcast(browsers, { type: "meta", latest: LATEST, server: LATEST, bridge: bridgeVer, asleep: false });
         }
       } else {
         browsers.add(ws);
@@ -829,7 +849,7 @@ wss.on("connection", (ws) => {
     // stream live appends for that id only. Requires the command key
     // (the log is only visible to authorized users).
     if (ws.role === "browser" && msg.type === "watch") {
-      if (CMD_KEY && msg.key !== CMD_KEY) { ws.watching = null; return; }
+      if (CMD_KEY && !safeCmpWsKey(msg.key)) { ws.watching = null; return; }
       ws.watching = msg.id;
       if (msg.id != null) send(ws, { type: "log", id: msg.id, full: true, lines: logs.get(msg.id) || [] });
       return;
@@ -837,17 +857,23 @@ wss.on("connection", (ws) => {
 
     // Validate a command key (lets the dashboard unlock the buttons)
     if (ws.role === "browser" && msg.type === "auth") {
-      send(ws, { type: CMD_KEY && msg.key !== CMD_KEY ? "auth_fail" : "auth_ok" });
+      send(ws, { type: CMD_KEY && !safeCmpWsKey(msg.key) ? "auth_fail" : "auth_ok" });
       return;
     }
 
     if (ws.role === "browser" && msg.type === "command" && msg.payload) {
-      if (CMD_KEY && msg.key !== CMD_KEY) { send(ws, { type: "denied" }); return; }
+      if (CMD_KEY && !safeCmpWsKey(msg.key)) { send(ws, { type: "denied" }); return; }
       // reset_zones is a SERVER action (free a site to be mined again),
       // not a turtle command - handle it here, don't forward to bridges.
       // NOTE: intentionally does NOT touch stats — they are orthogonal.
       if (msg.payload.cmd === "reset_zones") {
         const s = msg.payload.site;
+        // R3-2: reject a non-null site key that is not a valid "x,y,z" triple.
+        // Prevents prototype-pollution via keys like "__proto__" (zones["__proto__"]
+        // resolves to Object.prototype, entering the per-site branch as a no-op and
+        // broadcasting a confusing {type:"zones", site:"__proto__", z:null}).
+        // siteKey() always produces the "-?\d+,-?\d+,-?\d+" form; anything else is invalid.
+        if (s != null && s !== "" && !/^-?\d+,-?\d+,-?\d+$/.test(s)) return;
         if (s && zones[s]) delete zones[s]; else zones = {};
         // Reset site-finished dedup so alerts can fire again on the new run.
         if (s) siteFinishedAlerted.delete(s); else siteFinishedAlerted.clear();
@@ -972,6 +998,13 @@ setInterval(() => {
   // to prevent unbounded map growth when webhooks are disabled.
   for (const [id] of webhookState) {
     if (!lastKnown[id] && !turtles.has(id)) webhookState.delete(id);
+  }
+  // R3-1: Prune logs Map — mirror the webhookState prune above. The logs Map
+  // is keyed by msg.id (same type as turtles), so the same coercion applies.
+  // logs.get(unknown_id) returns undefined; the watch handler guards with || []
+  // so a pruned entry is handled gracefully.
+  for (const [id] of logs) {
+    if (!lastKnown[id] && !turtles.has(id)) logs.delete(id);
   }
 }, 5000);
 

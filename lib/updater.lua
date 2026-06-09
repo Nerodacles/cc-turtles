@@ -69,6 +69,11 @@ end
 
 -- Fire all requests at once (http.request is async) and collect
 -- http_success / http_failure events: N files in ~1 round trip.
+-- CONSTRAINT: Updater.run() MUST be called before any parallel.waitForAny().
+-- The os.pullEvent() below has no event filter and will drain rednet/timer/key
+-- events produced by other coroutines. Calling fetchAll from inside a running
+-- parallel group would starve those threads. Always call Updater.run at boot,
+-- not from within an already-running parallel.
 local function fetchAll(files)
     local pending = {}  -- busted url -> dest
     local count   = 0

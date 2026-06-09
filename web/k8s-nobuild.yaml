@@ -96,6 +96,14 @@ spec:
             tcpSocket: { port: 8080 }
             initialDelaySeconds: 15
             periodSeconds: 5
+          # Liveness: restart the pod if the Node event loop stalls (e.g. a slow
+          # PVC writeFileSync) so a readiness-fail doesn't hang it forever.
+          # Hits /api/health on the pod directly (no token; not via the ingress).
+          livenessProbe:
+            httpGet: { path: /api/health, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
           resources:
             requests: { cpu: 25m, memory: 64Mi }
             limits:   { cpu: 250m, memory: 192Mi }

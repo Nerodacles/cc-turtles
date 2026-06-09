@@ -1149,7 +1149,11 @@ local function relocateToNewZone()
         state.depth = state.depth - 1
         Utils.saveState(state)
     end
-    walkTo(state.shaft.x, state.shaft.z, "zx")  -- back to the hub
+    -- FIX: lava in the return tunnel leaves us mid-shaft-walk; treat as
+    -- zone exhausted with no new zone (caller sets phase="return").
+    if not walkTo(state.shaft.x, state.shaft.z, "zx") then
+        return false  -- lava wall on return; can't reach hub to renegotiate
+    end
 
     -- F2: acquireSlotWithRoll handles server + decentralized fallback and
     -- site-roll if needed. Passes our just-finished zone as doneIdx so the
@@ -1212,7 +1216,19 @@ local function serviceTrip(fn)
         Utils.up(state)
         state.depth = state.depth - 1
     end
-    walkTo(state.shaft.x, state.shaft.z, "zx")
+    -- FIX (call site 2): lava in the tunnel means we can't reach the shaft.
+    -- Skip fn() entirely (don't strand a courier waiting there).
+    -- Walk back to the zone center (path is clear: lava was sealed ahead),
+    -- then descend to room depth so state.depth and physical position stay
+    -- consistent. Return false so the caller aborts the service trip cleanly.
+    if not walkTo(state.shaft.x, state.shaft.z, "zx") then
+        walkTo(state.center.x, state.center.z, "xz")
+        for _ = 1, climb do
+            Utils.down(state)
+            state.depth = state.depth + 1
+        end
+        return false
+    end
 
     -- Hold the shaft during the transfer: the courier/fueler descends
     -- the column to reach us, so nobody else may use it meanwhile.
@@ -1225,11 +1241,29 @@ local function serviceTrip(fn)
     end
 
     currentPhase = "to_zone"
-    walkTo(state.center.x, state.center.z, "xz")
-    for _ = 1, climb do
-        Utils.down(state)
-        state.depth = state.depth + 1
+    -- FIX (call site 3): lava in the return tunnel leaves us somewhere
+    -- between the shaft and zone center with state.depth already at
+    -- targetDepth(). Retry once (filler block now solid) so the descent
+    -- loop starts from the right XZ column.
+    -- IMPORTANT: only descend if we actually reached the zone center.
+    -- If both attempts fail (lava still blocking or GPS dead), leave
+    -- state.depth at targetDepth() — physically correct for tunnel level.
+    -- The next mine-resume will re-center via GPS; no over-count.
+    local atCenter = walkTo(state.center.x, state.center.z, "xz")
+    if not atCenter then
+        -- walkAxis sealed lava ahead; retry — the filler block is now
+        -- solid so the path should be clear. walkAxis takes its own GPS
+        -- fix at entry; no separate gps.locate() needed here.
+        atCenter = walkTo(state.center.x, state.center.z, "xz")
     end
+    if atCenter then
+        for _ = 1, climb do
+            Utils.down(state)
+            state.depth = state.depth + 1
+        end
+    end
+    -- If atCenter is false: state.depth == targetDepth() (tunnel level),
+    -- which matches the turtle's physical Y. mine-resume re-centers via GPS.
     return ok
 end
 
@@ -1251,7 +1285,19 @@ local function goHome()
 
     -- Retrace the tunnel to the shaft bottom and climb out through
     -- the SAME single column (the lane lock serializes traffic)
-    walkTo(state.shaft.x, state.shaft.z, "zx")
+    -- FIX (call site 4): lava mid-tunnel would leave us stranded, after
+    -- which the Lane.enter + shaft climb would bore through solid terrain
+    -- from the wrong XZ.  Retry once; if still blocked fall back to the
+    -- trail backtrack which ends at home by construction (no GPS needed).
+    if not walkTo(state.shaft.x, state.shaft.z, "zx") then
+        print("[return] Lava in tunnel - retrying walk to shaft...")
+        if not walkTo(state.shaft.x, state.shaft.z, "zx") then
+            print("[return] Still blocked - backtracking the full trail...")
+            pcall(Nav.orient)
+            Trail.backtrack(Nav)
+            return  -- Trail.backtrack ends at home; no further steps needed
+        end
+    end
     -- Join the up-convoy (grandfathered if resuming mid-climb: see
     -- the descend branch for the deadlock rationale)
     if not state.inShaft then
@@ -1609,6 +1655,14 @@ local function mission()
 
     -- Clean slate; reboot into startup to wait for the next site
     Trail.clear()  -- verified home: journal no longer needed
+    -- FIX: restore /site.json to the TRUE origin before wiping state so that
+    -- the next fresh boot (state.json absent) seeds siteOrigin correctly.
+    -- state.siteOrigin was set at mission start and never mutated; it is valid
+    -- here. Without this, /site.json holds the last ROLLED site's coords and
+    -- a new boot computes every siteCenter() from a wrong base.
+    if state.siteOrigin then
+        Utils.writeJSON("/site.json", state.siteOrigin)
+    end
     Utils.clearState()
     print("[done] Rebooting to wait for the next dig site...")
     os.sleep(2)

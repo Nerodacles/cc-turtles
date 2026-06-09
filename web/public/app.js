@@ -35,7 +35,13 @@ const oreColor = (n) => ORE_COLOR[n] || "#c0c8d4";
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = () => { setConn(true); ws.send(JSON.stringify({ type: "hello", role: "browser" })); };
+  ws.onopen = () => {
+    setConn(true);
+    ws.send(JSON.stringify({ type: "hello", role: "browser" }));
+    // Re-subscribe to the open turtle log after a reconnect so log streaming
+    // resumes without the user having to re-open the detail panel.
+    if (watchId != null) ws.send(JSON.stringify({ type: "watch", id: watchId, key: cmdKey }));
+  };
   ws.onclose = () => { setConn(false); clearTimeout(reconnectT); reconnectT = setTimeout(connect, 1500); };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {

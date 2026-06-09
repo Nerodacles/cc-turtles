@@ -33,10 +33,21 @@ local function fuelWatch()
         os.sleep(FUEL_CHECK_INTERVAL)
         if Service.phase == "idle" and not refueling
            and Fuel.level() < LOW_FUEL then
-            if not Fuel.refuel(LOW_FUEL) then
-                refueling = true
-                Fuel.requestDelivery(LOW_FUEL * 2)
-                refueling = false
+            -- Set refueling BEFORE any yielding call so canServe (running in
+            -- the parallel mainLoop coroutine) never observes refueling=false
+            -- during the delivery wait window and flies off concurrently.
+            refueling = true
+            -- pcall ensures refueling is always cleared even if Fuel.refuel or
+            -- Fuel.requestDelivery throws (e.g. modem detaches mid-call).
+            -- The loop survives the error so fuelWatch keeps running.
+            local ok, err = pcall(function()
+                if not Fuel.refuel(LOW_FUEL) then
+                    Fuel.requestDelivery(LOW_FUEL * 2)
+                end
+            end)
+            refueling = false  -- unconditional: never sticks true
+            if not ok then
+                print("[fuelWatch] refuel error: " .. tostring(err))
             end
         end
     end

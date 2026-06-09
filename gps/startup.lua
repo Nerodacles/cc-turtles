@@ -20,6 +20,9 @@ local function loadPos()
         local f = fs.open(POS_FILE, "r")
         local pos = textutils.unserialize(f.readAll())
         f.close()
+        if not pos or pos.x == nil or pos.y == nil or pos.z == nil then
+            return nil  -- malformed/partial file; fall through to interactive setup
+        end
         return pos
     end
     return nil
