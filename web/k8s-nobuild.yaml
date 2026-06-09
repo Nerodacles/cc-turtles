@@ -1,6 +1,7 @@
-# No-build deploy: a node:22-alpine pod clones the public repo and runs
-# the server (no registry/docker needed). Traefik IngressRoute (public).
-# For production, build a real image (web/Dockerfile) and use k8s.yaml.
+# No-build deploy (the live manifest): a node:22-alpine pod clones the public
+# repo and runs the server (no registry/docker needed). Traefik IngressRoute
+# (public) on both web + websecure. For a registry-image deploy instead, build
+# web/Dockerfile and adapt this manifest's container image + remove the clone.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -34,7 +34,7 @@ mc/
 └── web/
     ├── server.js      # Node WebSocket + static server
     ├── public/        # Live browser dashboard (list + top-down map)
-    ├── Dockerfile · docker-compose.yml · k8s.yaml
+    ├── Dockerfile · docker-compose.yml · k8s-nobuild.yaml
     └── package.json
 ```
 
@@ -76,7 +76,7 @@ turtles ──rednet swarm_status──▶ bridge (CC computer) ──WebSocket�
 ```
 cd web && docker compose up --build      # http://localhost:8080
 ```
-or on the cluster: build/push the image and `kubectl apply -f web/k8s.yaml` (Traefik IngressRoute included; WebSockets route transparently).
+or on the cluster: `kubectl apply -f web/k8s-nobuild.yaml` (a `node:22-alpine` pod clones `main` and runs `server.js` — no registry image needed; Traefik IngressRoute included on both entrypoints, WebSockets route transparently).
 
 **Bridge** — one CC computer/turtle with a wireless modem + HTTP, in rednet range of the swarm (next to a GPS repeater is ideal). It defaults to `wss://turtles.infra.com.do`; install:
 ```

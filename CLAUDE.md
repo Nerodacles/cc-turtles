@@ -13,7 +13,7 @@ turtles ──rednet swarm_*──▶ bridge (CC) ──wss──▶ server.js (
 
 - **Lua**: `miner/ courier/ fueler/ gps/ pocket/ bridge/` + `lib/` (utils, nav, lane, trail, swarm, fuel, service, updater, version). Sin coordinador: heartbeats rednet con TTL. La firma de versión global vive en `lib/version.lua`.
 - **Web**: `web/server.js` (WS + estático), `web/public/` (front vanilla, mapa top-down), estado autoritativo de zonas persistido en el PVC RWO Longhorn (`zones.json`/`turtles.json` en `/data`).
-- **Despliegue**: `web/k8s-nobuild.yaml` (modelo vivo: pod `node:22-alpine` que clona `main` y corre `server.js`), `web/k8s.yaml` (imagen de registry), namespace `devops`, host `turtles.infra.com.do`, IngressRoute Traefik en **ambos** entrypoints. **Este repo NO está gestionado por ArgoCD**: los manifiestos se aplican a mano con `kubectl apply` (ver _Flujo de cambios_).
+- **Despliegue**: `web/k8s-nobuild.yaml` (único manifiesto vivo: pod `node:22-alpine` que clona `main` y corre `server.js`), namespace `devops`, host `turtles.infra.com.do`, IngressRoute Traefik en **ambos** entrypoints. **Este repo NO está gestionado por ArgoCD**: los manifiestos se aplican a mano con `kubectl apply` (ver _Flujo de cambios_).
 
 La documentación funcional completa está en `README.md` — leerlo antes de razonar sobre comportamiento del enjambre.
 

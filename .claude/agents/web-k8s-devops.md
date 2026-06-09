@@ -33,8 +33,7 @@ type: project | feedback | reference
 ## What you own (this repo)
 
 - **`web/k8s-nobuild.yaml`** — the *live* model: a `node:22-alpine` pod that `apk add git`, clones the public repo, `npm install --omit=dev`, runs `server.js` from `/app/repo/web` (so it can read `../lib/version.lua`). Includes the **`cc-turtles-data` Longhorn RWO PVC** mounted at `/data`, the Service, and the Traefik IngressRoute on **both `web` and `websecure`**. `CMD_KEY` from optional Secret `cc-turtles-cmdkey`.
-- **`web/k8s.yaml`** — the production/registry-image variant (build & push `web/Dockerfile`, set image, apply). Same Service + IngressRoute.
-- **`web/Dockerfile`, `web/docker-compose.yml`** — local/image build path.
+- **`web/Dockerfile`, `web/docker-compose.yml`** — local/image build path (compose builds from the repo root context). There is no separate registry-image manifest; `k8s-nobuild.yaml` is the only deploy manifest.
 - Namespace **`devops`** (alongside copyparty, uptime-kuma, mmg, kite). Host `turtles.infra.com.do`.
 
 ## Cluster rules you must honor (from CLAUDE.md)

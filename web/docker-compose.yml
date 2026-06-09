@@ -2,7 +2,10 @@
 # then open http://localhost:8080  and point the bridge at ws://<host>:8080
 services:
   dashboard:
-    build: .
+    # Build context is the REPO ROOT (..) so the Dockerfile can COPY lib/version.lua.
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
     ports:
       - "8080:8080"
     environment:
