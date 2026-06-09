@@ -108,7 +108,10 @@ else
         print("[boot] Entry point: " .. known.x .. "," .. known.y .. "," .. known.z)
         print("[boot] Waiting for 'start' ('s' on the pocket)...")
     else
-        print("[boot] No entry point set. Press 'm' on the pocket first.")
+        -- A freshly added miner no longer needs the pocket: autoSite
+        -- (below) keeps asking the swarm for the shared entry point and
+        -- joins on its own as soon as a live miner answers.
+        print("[boot] No entry point - asking the swarm to join the dig...")
     end
 
     local site = nil
@@ -197,7 +200,38 @@ else
         end
     end
 
-    parallel.waitForAny(waitSite, heartbeat, fuelWatch, siteResponder)
+    -- AUTO-JOIN: a fresh miner with no entry point keeps asking the swarm
+    -- for the shared site and starts on its own once a live miner answers
+    -- - no 'm'/'start' on the pocket needed. A pocket 'mine_at' still wins
+    -- (it writes site.json, which this loop picks up next tick). Returning
+    -- ends parallel.waitForAny and falls through to seed-state + main.lua,
+    -- exactly like a manual 'start'.
+    local function autoSite()
+        while true do
+            local s = loadSite()           -- set by pocket 'mine_at', or by us below
+            if s then site = s; return end
+            Swarm.bcast({ type = "site_query" }, "swarm_site")
+            local deadline = os.clock() + 3
+            while os.clock() < deadline do
+                local _, m2 = rednet.receive("swarm_site", 0.5)
+                if Swarm.ok(m2) and m2.type == "site" and m2.pos then
+                    saveSite(m2.pos)
+                    site = loadSite()
+                    print("[boot] Joined the swarm at " ..
+                          site.x .. "," .. site.y .. "," .. site.z)
+                    return
+                end
+            end
+            os.sleep(2)                    -- backoff before re-broadcasting
+        end
+    end
+
+    -- auto-join only for a fresh miner with NO entry point yet; one that
+    -- already knows its site keeps the manual 'start' flow (so you can
+    -- still position it deliberately without it bolting off on boot).
+    local threads = { waitSite, heartbeat, fuelWatch, siteResponder }
+    if not known then table.insert(threads, autoSite) end
+    parallel.waitForAny(table.unpack(threads))
 
     print("[boot] Dig site: " .. site.x .. "," .. site.y .. "," .. site.z)
     -- Seed the mission state so main.lua (and crash resumes) know the site

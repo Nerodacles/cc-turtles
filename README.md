@@ -110,7 +110,7 @@ Verify from any turtle/pocket in range: run `gps locate` several times — it mu
 
 ### Adding miners mid-operation
 
-Drop in a new miner anytime (`wget` + `reboot`) and press `s`: it asks the swarm for the entry point (`site_query` — both active and idle miners answer from their `site.json`), negotiates a free zone slot against the ones already mining, queues for the shaft lane like everyone else and starts working. No re-marking needed; miners mid-mission ignore the `s` and just keep going.
+Drop in a new miner anytime (`wget` + `reboot`) — **no pocket interaction needed**. A miner with no entry point of its own auto-joins: it broadcasts `site_query` on boot (retrying every few seconds) and as soon as any active or idle miner answers from its `site.json`, it adopts that site, negotiates a free zone slot against the ones already mining, queues for the shaft lane like everyone else and starts working. Pressing `s` still works (and is the fallback when there are no peers yet — the very first miner of a fresh site still needs an `m`), and a pocket `m` sent before a peer answers still wins. Miners mid-mission ignore the `s`/auto-join and just keep going.
 
 ### Multi-miner zone assignment (no coordinator)
 
