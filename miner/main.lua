@@ -1208,7 +1208,10 @@ end
 local function serviceTrip(fn)
     currentPhase = "to_shaft"
     local climb = state.depth - targetDepth()
-    for _ = 1, climb do Utils.up(state) end
+    for _ = 1, climb do
+        Utils.up(state)
+        state.depth = state.depth - 1
+    end
     walkTo(state.shaft.x, state.shaft.z, "zx")
 
     -- Hold the shaft during the transfer: the courier/fueler descends
@@ -1223,7 +1226,10 @@ local function serviceTrip(fn)
 
     currentPhase = "to_zone"
     walkTo(state.center.x, state.center.z, "xz")
-    for _ = 1, climb do Utils.down(state) end
+    for _ = 1, climb do
+        Utils.down(state)
+        state.depth = state.depth + 1
+    end
     return ok
 end
 
