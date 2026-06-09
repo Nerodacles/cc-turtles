@@ -315,9 +315,14 @@ function offlineCardHtml(id, now) {
   const r = lastKnown[id] || {};
   const c = roleColor(r.role);
   const ago = fmtAgo(r.ts, now);
-  const posStr = r.pos ? `X${r.pos.x} Y${r.pos.y} Z${r.pos.z}` : "pos unknown";
-  const layer = r.level != null ? ` · Y${r.level}` : "";
-  const zone  = r.zoneIdx != null ? ` · zone ${r.zoneIdx}` : "";
+  // Coerce numerics before interpolation — prevents XSS if a compromised bridge
+  // sends a string with HTML special chars in a position/index field.
+  const px = r.pos ? Number(r.pos.x) : null;
+  const py = r.pos ? Number(r.pos.y) : null;
+  const pz = r.pos ? Number(r.pos.z) : null;
+  const posStr = (px != null && !Number.isNaN(px)) ? `X${px} Y${py} Z${pz}` : "pos unknown";
+  const layer = r.level != null ? ` · Y${Number(r.level)}` : "";
+  const zone  = r.zoneIdx != null ? ` · zone ${Number(r.zoneIdx)}` : "";
   return `<div class="card stale ${+id === watchId ? "sel" : ""}" data-id="${id}">
     <span class="dot" style="background:${c};opacity:0.5"></span>
     <div>

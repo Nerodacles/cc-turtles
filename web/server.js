@@ -543,8 +543,23 @@ const server = http.createServer((req, res) => {
   //   /api/logs            -> JSON list of available day-files + sizes
   //   /api/logs?day=DATE   -> the raw text of that day's log
   if (urlPath === "/api/logs") {
+    // Auth: timing-safe CMD_KEY check — accepts ?key= OR Authorization: Bearer.
+    // Mirrors checkReadKey() structure but compares against CMD_KEY, not READ_KEY.
+    // Unset CMD_KEY means no gate (same behaviour as the WS watch handler).
+    if (CMD_KEY) {
+      const expected = Buffer.from(CMD_KEY, "utf8");
+      function safeCmpCmd(supplied) {
+        if (!supplied) return false;
+        const s = Buffer.from(supplied, "utf8");
+        if (s.length !== expected.length) return false;
+        return crypto.timingSafeEqual(s, expected);
+      }
+      const q2 = new URLSearchParams((req.url || "").split("?")[1] || "");
+      const auth2 = req.headers["authorization"] || "";
+      const ok = safeCmpCmd(q2.get("key")) || (auth2.startsWith("Bearer ") && safeCmpCmd(auth2.slice(7)));
+      if (!ok) { res.writeHead(401); return res.end("key required"); }
+    }
     const q = new URLSearchParams((req.url || "").split("?")[1] || "");
-    if (CMD_KEY && q.get("key") !== CMD_KEY) { res.writeHead(401); return res.end("key required"); }
     const day = q.get("day");
     if (day) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { res.writeHead(400); return res.end("bad day"); }
@@ -943,7 +958,7 @@ setInterval(() => {
     }
   }
 
-  // 5. Prune old rare-ore dedup entries, hazard dedup entries, and webhookState for evicted turtles
+  // 5. Prune old rare-ore dedup entries and hazard dedup entries (only relevant when webhook is on).
   if (WEBHOOK_URL) {
     for (const [k, ts] of rareSeen) {
       if (now - ts > RARE_DEDUP_MS * 2) rareSeen.delete(k);
@@ -951,10 +966,12 @@ setInterval(() => {
     for (const [k, ts] of hazardSeen) {
       if (now - ts > HAZARD_DEDUP_MS * 2) hazardSeen.delete(k);
     }
-    // Prune webhookState for turtles no longer in lastKnown (fully gone)
-    for (const [id] of webhookState) {
-      if (!lastKnown[id] && !turtles.has(id)) webhookState.delete(id);
-    }
+  }
+  // Prune webhookState unconditionally — entries are created on every heartbeat
+  // via wState() regardless of WEBHOOK_URL, so pruning must run regardless too
+  // to prevent unbounded map growth when webhooks are disabled.
+  for (const [id] of webhookState) {
+    if (!lastKnown[id] && !turtles.has(id)) webhookState.delete(id);
   }
 }, 5000);
 
@@ -974,3 +991,10 @@ function flushAndExit() {
 }
 process.on("SIGTERM", flushAndExit);
 process.on("SIGINT", flushAndExit);
+// Log unhandled promise rejections so a future un-caught async path is visible
+// in the pod logs. Log-only — do not swallow or suppress the crash; the default
+// Node behaviour (exit on unhandled rejection since Node 15) is intentionally
+// preserved so a real uncaught error still brings down the pod cleanly.
+process.on("unhandledRejection", (reason) => {
+  console.error("[crash] unhandled rejection:", reason);
+});
