@@ -323,17 +323,20 @@ function offlineCardHtml(id, now) {
   const ago = fmtAgo(r.ts, now);
   // Coerce numerics before interpolation — prevents XSS if a compromised bridge
   // sends a string with HTML special chars in a position/index field.
+  // safeId: id comes from Object.keys(lastKnown) so it is always a string; escape
+  // it for defense-in-depth in data-id and #id text nodes.
+  const safeId = esc(id);
   const px = r.pos ? Number(r.pos.x) : null;
   const py = r.pos ? Number(r.pos.y) : null;
   const pz = r.pos ? Number(r.pos.z) : null;
   const posStr = (px != null && !Number.isNaN(px)) ? `X${px} Y${py} Z${pz}` : "pos unknown";
   const layer = r.level != null ? ` · Y${Number(r.level)}` : "";
   const zone  = r.zoneIdx != null ? ` · zone ${Number(r.zoneIdx)}` : "";
-  return `<div class="card stale ${+id === watchId ? "sel" : ""}" data-id="${id}">
+  return `<div class="card stale ${+id === watchId ? "sel" : ""}" data-id="${safeId}">
     <span class="dot" style="background:${c};opacity:0.5"></span>
     <div>
       <span class="name" style="color:var(--dim)">${esc(r.label || ("#" + id))}</span>
-      <div class="sub">#${id} · offline · ${ago}${zone}${layer}</div>
+      <div class="sub">#${safeId} · offline · ${ago}${zone}${layer}</div>
       <div class="sub" style="font-size:11px;color:#5a6472">${posStr}</div>
     </div>
     <div class="right" style="font-size:11px;color:var(--dim)">◌</div>
@@ -343,17 +346,22 @@ function cardHtml(id, now) {
   const t = turtles.get(id), d = t.data;
   const stale = now - t.last > STALE_MS;
   const c = roleColor(d.role);
-  const slot = d.role === "miner" && d.slot != null ? " · zone " + d.slot : "";
+  // Coerce numerics — prevents XSS if a forged/compromised bridge sends a string
+  // with HTML special chars where a number is expected (defense-in-depth, mirrors
+  // the offline card). After server fix R5-2, id is always an integer, but we
+  // still escape it here for defense-in-depth.
+  const safeId = esc(id);
+  const slot = d.role === "miner" && d.slot != null ? " · zone " + Number(d.slot) : "";
   // current mining layer (the server persists the deepest per zone)
-  const layer = d.role === "miner" && d.level != null ? " · Y" + d.level : "";
-  const inv = d.inv || 0;
+  const layer = d.role === "miner" && d.level != null ? " · Y" + Number(d.level) : "";
+  const inv = Number(d.inv) || 0;
   const ver = d.ver
     ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
-  return `<div class="card ${stale ? "stale" : ""} ${id === watchId ? "sel" : ""}" data-id="${id}">
+  return `<div class="card ${stale ? "stale" : ""} ${id === watchId ? "sel" : ""}" data-id="${safeId}">
     <span class="dot" style="background:${c}"></span>
     <div>
       <span class="name">${esc(d.label || id)}</span>
-      <div class="sub">#${id} · ${esc(d.phase || "?")}${slot}${layer} ${ver}</div>
+      <div class="sub">#${safeId} · ${esc(d.phase || "?")}${slot}${layer} ${ver}</div>
       <div class="bar"><i style="width:${inv}%;background:${c}"></i></div>
     </div>
     <div class="right">⛽ ${fmtFuel(d.fuel)}<br>📦 ${inv}%</div>

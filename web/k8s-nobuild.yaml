@@ -74,6 +74,18 @@ spec:
                   name: cc-turtles-readkey
                   key: key
                   optional: true
+            # Bridge auth gate: the in-game bridge WebSocket must present this
+            # key in its hello message or the connection is rejected. Sourced
+            # from a Secret (not in git) - create it:
+            #   kubectl -n devops create secret generic cc-turtles-bridgekey \
+            #     --from-literal=key=YOUR-BRIDGE-KEY
+            # Absent secret = bridge endpoint open (no gate), optional: true.
+            - name: BRIDGE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cc-turtles-bridgekey
+                  key: key
+                  optional: true
             # F5: Webhook (Discord-compatible) alert URL. Sourced from a
             # Secret so the URL is never in git. Create it:
             #   kubectl -n devops create secret generic cc-turtles-webhook \

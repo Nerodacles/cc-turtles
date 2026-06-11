@@ -11,15 +11,21 @@ package.path = package.path .. ";/lib/?.lua"
 local Swarm = require("swarm")
 local VERSION = require("version")
 
--- Default server (override in /bridge.json -> { url = "wss://host" }).
+-- Default server (override in /bridge.json -> { url = "wss://host", key = "secret" }).
 -- wss:// because the site is served over HTTPS - the browser uses wss
 -- too, so the bridge must match (ws:// would be mixed-content).
-local URL = "wss://turtles.infra.com.do"
+local URL        = "wss://turtles.infra.com.do"
+local BRIDGE_KEY = nil  -- WS bridge↔server auth; nil = open/legacy mode.
+                        -- NOTE: this is SEPARATE from Swarm.KEY (the rednet
+                        -- swarm secret). BRIDGE_KEY authenticates the bridge
+                        -- connection to the web server; Swarm.KEY authenticates
+                        -- turtle↔turtle rednet messages. Never mix the two.
 if fs.exists("/bridge.json") then
     local f = fs.open("/bridge.json", "r")
     local c = textutils.unserialize(f.readAll())
     f.close()
     if c and c.url then URL = c.url end
+    if c and c.key then BRIDGE_KEY = c.key end
 end
 
 -- Open the wireless modem
@@ -36,7 +42,10 @@ local function connect()
         print("[bridge] Connect failed: " .. tostring(err))
         return nil
     end
-    ws.send(textutils.serializeJSON({ type = "hello", role = "bridge", ver = VERSION }))
+    -- Include key only when configured; nil fields are omitted by
+    -- serializeJSON so the legacy (open) server path is preserved.
+    ws.send(textutils.serializeJSON({ type = "hello", role = "bridge",
+                                      ver = VERSION, key = BRIDGE_KEY }))
     print("[bridge] Connected.")
     return ws
 end

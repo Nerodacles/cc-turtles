@@ -478,6 +478,32 @@ local function acquireSlotWithRoll(doneIdx)
         end
         print("[site] Site " .. (state.siteIndex or 0) .. " full - rolling to site " .. nextK)
         Trail.clear()  -- start fresh trail for the new site flight
+
+        -- LANE-HELD SHAFT CLIMB: we are at the shaft junction at tunnel level.
+        -- flyToSite()'s Nav.goTo would ascend the shared 1x1 column without a
+        -- lock, colliding with any descending miner. Acquire the UP convoy and
+        -- climb clear of the column first; then flyToSite cruises horizontally
+        -- at surface level (no vertical shaft traversal needed after this).
+        -- Mirror of the goHome up-convoy pattern.
+        if state.shaft and state.topY and state.depth and state.depth > 0 then
+            if Lane.enter(state.shaft.x, state.shaft.z, "up",
+                          function() return stopFlag end) then
+                while state.depth > 0 do
+                    Utils.up(state)
+                    state.depth = state.depth - 1
+                    Utils.saveState(state)
+                end
+                Lane.exit()  -- clear of the column at the surface
+            else
+                -- Stop arrived while queuing for the up convoy. Abort the
+                -- site-roll cleanly: falling through to flyToSite() here would
+                -- let Nav.goTo ascend the shared shaft WITHOUT the lane lock.
+                -- nil,nil propagates to mission() which calls goHome(), and
+                -- goHome acquires the lane correctly before any shaft ascent.
+                return nil, nil
+            end
+        end
+
         flyToSite(nextK)
         -- After flyToSite the miner is at the new site: loop to negotiate there
     end
@@ -1655,12 +1681,13 @@ local function mission()
 
     -- Clean slate; reboot into startup to wait for the next site
     Trail.clear()  -- verified home: journal no longer needed
-    -- FIX: restore /site.json to the TRUE origin before wiping state so that
-    -- the next fresh boot (state.json absent) seeds siteOrigin correctly.
-    -- state.siteOrigin was set at mission start and never mutated; it is valid
-    -- here. Without this, /site.json holds the last ROLLED site's coords and
-    -- a new boot computes every siteCenter() from a wrong base.
-    if state.siteOrigin then
+    -- Restore /site.json to the TRUE origin (state.siteOrigin) ONLY when the
+    -- miner actually rolled away from it (siteIndex > 0). Without this guard,
+    -- a pure origin-site mission (siteIndex == 0) would overwrite a
+    -- mid-mission mine_at command that the listener just wrote to /site.json,
+    -- clobbering the user's new entry point for the next mission.
+    -- When siteIndex == 0 the rolled site IS the origin, so no restore needed.
+    if state.siteOrigin and (state.siteIndex or 0) > 0 then
         Utils.writeJSON("/site.json", state.siteOrigin)
     end
     Utils.clearState()

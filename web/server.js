@@ -27,6 +27,14 @@ const CMD_KEY = process.env.CMD_KEY || "";
 // Read-only API key. Absent/empty => read API is DISABLED (503).
 // Set READ_KEY in the deployment Secret (cc-turtles-readkey).
 const READ_KEY = process.env.READ_KEY || "";
+// lastKnown retention: evict PVC entries older than this (default 7 days).
+// Keeps "find a lost turtle" working within the window without growing the PVC unbounded.
+const LASTKNOWN_TTL = parseInt(process.env.LASTKNOWN_TTL_MS || "604800000", 10);
+// Bridge auth key: the CC bridge must supply this in its hello message as `key`.
+// SEPARATE from CMD_KEY (browser commands) and from the in-game swarm secret (rednet auth).
+// Empty = unauthenticated/open (legacy behaviour, same idiom as CMD_KEY).
+// Set BRIDGE_KEY in the deployment Secret to lock the bridge endpoint.
+const BRIDGE_KEY = process.env.BRIDGE_KEY || "";
 
 // ---- F5: WEBHOOK CONFIG ---------------------------------------------
 // WEBHOOK_URL: Discord-compatible HTTPS POST endpoint. Absent = no-op.
@@ -620,6 +628,20 @@ function safeCmpWsKey(supplied) {
   return crypto.timingSafeEqual(s, _cmdKeyBuf);
 }
 
+// safeCmpBridgeKey: timing-safe comparison for the bridge hello key.
+// Same idiom as safeCmpWsKey but for BRIDGE_KEY. When BRIDGE_KEY is unset,
+// always returns true (open/legacy). Callers gate with:
+//   if (BRIDGE_KEY && !safeCmpBridgeKey(msg.key)) { ... reject ... }
+const _bridgeKeyBuf = BRIDGE_KEY ? Buffer.from(BRIDGE_KEY, "utf8") : null;
+function safeCmpBridgeKey(supplied) {
+  if (!_bridgeKeyBuf) return true; // no key set — open
+  if (typeof supplied !== "string" || !supplied) return false;
+  const s = Buffer.from(supplied, "utf8");
+  if (s.length !== _bridgeKeyBuf.length) return false;
+  return crypto.timingSafeEqual(s, _bridgeKeyBuf);
+}
+if (!BRIDGE_KEY) console.warn("[security] BRIDGE_KEY is unset — bridge endpoint is unauthenticated (set BRIDGE_KEY to require auth)");
+
 const wss = new WebSocketServer({ server });
 const browsers = new Set();
 const bridges = new Set();
@@ -640,6 +662,13 @@ wss.on("connection", (ws) => {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.type === "hello") {
+      // Bridge hello shape: { type:"hello", role:"bridge", ver, key:<bridgeKey> }
+      // BRIDGE_KEY gate: if set, the bridge must supply a matching key or be rejected.
+      // This is separate from CMD_KEY (browser commands) and the swarm rednet secret.
+      if (msg.role === "bridge" && BRIDGE_KEY && !safeCmpBridgeKey(msg.key)) {
+        ws.close(1008, "bridge auth required");
+        return;
+      }
       ws.role = msg.role === "bridge" ? "bridge" : "browser";
       if (ws.role === "bridge") {
         bridges.add(ws);
@@ -670,7 +699,7 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (ws.role === "bridge" && msg.type === "status" && msg.id != null) {
+    if (ws.role === "bridge" && msg.type === "status" && Number.isInteger(msg.id)) {
       // WORLD-SLEEP: update the global last-heartbeat timestamp.
       // This is the MAX over all turtles — one active turtle keeps the swarm awake,
       // so a single offline turtle with other turtles still heartbeating is NOT asleep.
@@ -807,7 +836,7 @@ wss.on("connection", (ws) => {
 
     // ZONE allocation RPC (miner -> bridge -> here). Respond to the
     // bridge, which relays the grant back to the requesting miner.
-    if (ws.role === "bridge" && msg.type === "zone" && msg.site && msg.miner != null) {
+    if (ws.role === "bridge" && msg.type === "zone" && msg.site && Number.isInteger(msg.miner)) {
       if (msg.op === "done") {
         doneZone(msg.site, msg.miner, msg.idx);
       } else { // "request" (first) or "next" (mark idx done, then alloc) - atomic
@@ -1006,6 +1035,20 @@ setInterval(() => {
   for (const [id] of logs) {
     if (!lastKnown[id] && !turtles.has(id)) logs.delete(id);
   }
+  // R5-3: Prune lastKnown entries older than LASTKNOWN_TTL that are also not
+  // currently live. Without this, a flood of forged ids (or many real turtle ids
+  // accumulated over months) grows lastKnown and turtles.json on the PVC without
+  // bound. Legit offline turtles remain visible within the 7-day window.
+  { let pruned = false;
+    for (const id of Object.keys(lastKnown)) {
+      const rec = lastKnown[id];
+      if (turtles.has(+id)) continue; // live — never evict
+      if (rec.ts && now - rec.ts < LASTKNOWN_TTL) continue; // within retention window
+      delete lastKnown[id];
+      pruned = true;
+    }
+    if (pruned) saveTurtles();
+  }
 }, 5000);
 
 server.listen(PORT, () => {
@@ -1025,9 +1068,11 @@ function flushAndExit() {
 process.on("SIGTERM", flushAndExit);
 process.on("SIGINT", flushAndExit);
 // Log unhandled promise rejections so a future un-caught async path is visible
-// in the pod logs. Log-only — do not swallow or suppress the crash; the default
-// Node behaviour (exit on unhandled rejection since Node 15) is intentionally
-// preserved so a real uncaught error still brings down the pod cleanly.
+// in the pod logs. Registering this listener SUPPRESSES Node's default crash
+// behaviour (process.exit on unhandledRejection, Node ≥15) — the process logs
+// and survives (log-and-continue). This is intentional: a single bad async
+// path should not restart the pod and lose in-flight zone state. If you want
+// crash-on-rejection instead, add `process.exit(1)` inside this handler.
 process.on("unhandledRejection", (reason) => {
   console.error("[crash] unhandled rejection:", reason);
 });
