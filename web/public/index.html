@@ -2,46 +2,77 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Turtle Swarm</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header>
-    <h1>🐢 Turtle Swarm</h1>
-    <span id="conn" class="pill off">connecting…</span>
-    <span id="count" class="pill">0 turtles</span>
-    <span id="ver" class="pill">latest ?</span>
-    <span id="zones" class="pill">0 zones done</span>
-    <span id="sleep" class="pill" hidden>alerts muted — world asleep</span>
-    <button id="unlockBtn" class="muted" hidden>🔒 unlock</button>
+    <div class="brand">
+      <div class="mark">::</div>
+      <div class="brandtext">
+        <span class="bt-name">TURTLE&nbsp;SWARM</span>
+        <span class="bt-sub">// swarm control</span>
+      </div>
+    </div>
+
+    <div class="status">
+      <span id="conn" class="pill off">connecting…</span>
+      <span id="zones" class="pill infohide">0 zones done</span>
+      <span id="count" class="pill infohide">0 turtles</span>
+      <span id="ver" class="pill infohide">latest ?</span>
+      <span id="sleep" class="pill" hidden>alerts muted — world asleep</span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <button id="unlockBtn" class="muted" hidden>⊘ unlock</button>
     <div class="cmds" id="cmds" hidden>
-      <button data-cmd="start">▶ start</button>
-      <button data-cmd="pause">⏸ pause</button>
-      <button data-cmd="resume">⏵ resume</button>
-      <button data-cmd="stop" class="warn">⏏ home</button>
-      <button data-cmd="update" class="muted">⟳ update</button>
-      <button id="entryBtn" class="muted">⛏ entry…</button>
-      <button id="resetZonesBtn" class="warn" title="mark all zones unmined">♻ zones</button>
-      <button id="lockBtn" class="muted" title="forget the key">🔓</button>
+      <button data-cmd="start" class="primary">▶ start</button>
+      <button data-cmd="pause">‖ pause</button>
+      <button data-cmd="resume">▷ resume</button>
+      <button data-cmd="stop" class="warn">■ home</button>
+      <button data-cmd="update" class="muted">↻ update</button>
+      <button id="entryBtn" class="muted">⌖ entry</button>
+      <button id="resetZonesBtn" class="warn" title="mark all zones unmined">⟲ zones</button>
+      <button id="lockBtn" class="muted" title="forget the key">⊟</button>
     </div>
   </header>
+
+  <!-- KPI ribbon (filled by renderKpis) -->
+  <div id="kpiRibbon"></div>
 
   <main>
     <section id="mapWrap">
       <canvas id="map"></canvas>
+
+      <!-- map mode switch -->
+      <div id="mapModes">
+        <button data-mode="blocky" class="on">▦ blocky</button>
+        <button data-mode="schematic">⊹ schematic</button>
+        <button data-mode="heatmap">◓ heatmap</button>
+      </div>
+      <div id="roleLegend">
+        <span><i style="background:var(--miner)"></i>miner</span>
+        <span><i style="background:var(--courier)"></i>courier</span>
+        <span><i style="background:var(--fueler)"></i>fueler</span>
+      </div>
+
       <div id="legend"></div>
-      <div id="maphint">top-down · X→ · Z↓ · scroll to zoom · drag to pan</div>
+      <div id="maphint">top-down · X→ · Z↓ · scroll zoom · drag pan</div>
       <div id="mapOverlay">
         <div id="compass">
-          <svg width="36" height="36" viewBox="0 0 36 36">
-            <circle cx="18" cy="18" r="17" fill="none" stroke="#2b3340" stroke-width="1.5"/>
-            <polygon points="18,4 15,18 18,15 21,18" fill="#f85149" opacity="0.9"/>
-            <polygon points="18,32 15,18 18,21 21,18" fill="#8b97a7" opacity="0.7"/>
-            <text x="18" y="11" text-anchor="middle" fill="#f85149" font-size="7" font-family="ui-monospace,monospace" font-weight="700">N</text>
-            <text x="18" y="28.5" text-anchor="middle" fill="#8b97a7" font-size="6" font-family="ui-monospace,monospace">S</text>
-            <text x="29" y="20" text-anchor="middle" fill="#8b97a7" font-size="6" font-family="ui-monospace,monospace">E</text>
-            <text x="7" y="20" text-anchor="middle" fill="#8b97a7" font-size="6" font-family="ui-monospace,monospace">W</text>
+          <svg width="38" height="38" viewBox="0 0 36 36">
+            <circle cx="18" cy="18" r="16.5" fill="#07090Aaa" stroke="#232D32" stroke-width="1.5"/>
+            <polygon points="18,5 15,18 18,15.5 21,18" fill="#FF5470"/>
+            <polygon points="18,31 15,18 18,20.5 21,18" fill="#5E6E72"/>
+            <text x="18" y="11.5" text-anchor="middle" fill="#FF5470" font-size="7" font-family="JetBrains Mono,monospace" font-weight="700">N</text>
+            <text x="18" y="28.5" text-anchor="middle" fill="#7C8B8E" font-size="6" font-family="JetBrains Mono,monospace">S</text>
+            <text x="29" y="20" text-anchor="middle" fill="#7C8B8E" font-size="6" font-family="JetBrains Mono,monospace">E</text>
+            <text x="7" y="20" text-anchor="middle" fill="#7C8B8E" font-size="6" font-family="JetBrains Mono,monospace">W</text>
           </svg>
         </div>
         <div id="scalebar">
@@ -50,11 +81,12 @@
         </div>
       </div>
     </section>
+
     <section id="sidebar">
       <div id="statsPanel">
         <div id="statsHeader">Yield Stats <span id="statsSession" class="statsSessionLabel"></span></div>
         <table id="statsTable">
-          <thead><tr><th>Ore</th><th>Session</th><th title="per hour this session">Rate/h</th><th>Total</th></tr></thead>
+          <thead><tr><th>Ore</th><th>Session</th><th title="per hour this session">/h</th><th>Total</th></tr></thead>
           <tbody id="statsBody"><tr><td colspan="4" class="statsDim">no ore data yet</td></tr></tbody>
         </table>
       </div>
@@ -63,18 +95,28 @@
 
     <aside id="detail" hidden>
       <header>
+        <span class="d-accent" id="dAccent"></span>
         <b id="dName">turtle</b>
         <button id="dClose">✕</button>
       </header>
       <div class="dcmds" id="dcmds" hidden>
-        <button data-tcmd="pause">⏸ pause</button>
-        <button data-tcmd="resume">⏵ resume</button>
-        <button data-tcmd="stop" class="warn">⏏ home</button>
-        <button data-tcmd="update" class="muted">⟳ update</button>
+        <button data-tcmd="pause">‖ pause</button>
+        <button data-tcmd="resume">▷ resume</button>
+        <button data-tcmd="stop" class="warn">■ home</button>
+        <button data-tcmd="update" class="muted">↻ update</button>
       </div>
       <pre id="dLog"></pre>
     </aside>
   </main>
+
+  <!-- Event timeline (filled by renderEvents) -->
+  <footer id="eventLog">
+    <div class="el-head">
+      <span class="el-dot"></span>
+      <div class="el-titles"><span class="el-title">EVENT LOG</span><span class="el-sub">// live feed</span></div>
+    </div>
+    <div class="el-track" id="eventTrack"><span class="el-empty">$ waiting for swarm events…</span></div>
+  </footer>
 
   <dialog id="entryDlg">
     <form method="dialog">

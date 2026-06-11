@@ -1,7 +1,14 @@
 // app.js — dashboard client: live WS, turtle list + top-down map.
 
-const ROLE_COLOR = { miner: "#3fb950", courier: "#58a6ff", fueler: "#d29922" };
+const ROLE_COLOR = { miner: "#C2F23A", courier: "#2FD4C8", fueler: "#FFB23E" };
 const STALE_MS = 15000;
+
+// Map render mode: 'blocky' (voxel, default) | 'schematic' (blueprint) | 'heatmap'
+let mapMode = "blocky";
+// Client-side event feed (synthesised from incoming deltas) — bounded FIFO.
+const EVENT_CAP = 40;
+let eventSeq = 0;
+const events = []; // { id, ts, text, kind, color }
 
 const turtles = new Map(); // id -> { data, last }
 let lastKnown = {};        // id(str) -> { label, pos, level, role, site, zoneIdx, ts }
@@ -24,12 +31,14 @@ let worldAsleep = false;
 
 // ore name -> color (drops the minecraft:/_ore already)
 const ORE_COLOR = {
-  diamond: "#4ee6e6", emerald: "#3fe06b", ancient_debris: "#a8682f",
-  debris: "#a8682f", gold: "#f2c14e", nether_gold: "#f2c14e",
-  iron: "#d8b89a", copper: "#e0794a", redstone: "#f3534a",
-  lapis: "#3b6fe0", coal: "#5b6470", quartz: "#e8e2d8",
+  diamond: "#4FE9DC", emerald: "#46E08A", ancient_debris: "#C97A3A",
+  debris: "#C97A3A", gold: "#FFC857", nether_gold: "#FFC857",
+  iron: "#D8B89A", copper: "#E0794A", redstone: "#FF4D45",
+  lapis: "#3B6FE0", coal: "#7C8B8E", quartz: "#E8E2D8",
 };
-const oreColor = (n) => ORE_COLOR[n] || "#c0c8d4";
+const oreColor = (n) => ORE_COLOR[n] || "#9FACAE";
+// Rare ores get an emissive glow on the map + raise an event when found.
+const RARE_ORE = new Set(["diamond", "emerald", "ancient_debris", "debris"]);
 
 // ---- WebSocket ------------------------------------------------------
 function connect() {
@@ -81,6 +90,10 @@ function connect() {
     } else if (m.type === "denied") {
       lock(); alert("Command denied — key required.");
     } else if (m.type === "status") {
+      if (!turtles.has(m.id) && m.data) {
+        const nm = (lastKnown[m.id] && lastKnown[m.id].label) || m.data.label || ("#" + m.id);
+        pushEvent(`${nm} online`, "online", ROLE_COLOR[m.data.role] || "#9FACAE");
+      }
       turtles.set(m.id, { data: m.data, last: Date.now() });
       // mirror the server's deepest-layer record locally (no extra
       // traffic): keeps the detail "resume Y" fresh between zone ops
@@ -112,13 +125,20 @@ function connect() {
       if (atBottom) el.scrollTop = el.scrollHeight;
       return;
     } else if (m.type === "ores") {
-      for (const o of m.ores) ores.push(o);
+      for (const o of m.ores) {
+        ores.push(o);
+        if (RARE_ORE.has(o.n)) pushEvent(`${o.n} vein found`, "ore", oreColor(o.n));
+      }
       if (ores.length > 4000) ores.splice(0, ores.length - 4000);
     } else if (m.type === "hazards") {
       // F3: delta from server — append new hazards, trim to cap
-      for (const h of (m.hazards || [])) hazardsData.push(h);
+      for (const h of (m.hazards || [])) {
+        hazardsData.push(h);
+        pushEvent(`${hazardLabel(h.hazard)} detected`, "hazard", "#FF5470");
+      }
       if (hazardsData.length > HAZARD_CLIENT_CAP) hazardsData.splice(0, hazardsData.length - HAZARD_CLIENT_CAP);
     } else if (m.type === "gone") {
+      { const r = lastKnown[m.id] || {}; pushEvent(`${r.label || ("#" + m.id)} offline`, "offline", "#5E6E72"); }
       turtles.delete(m.id);
       trailClear(m.id);  // discard trail when turtle goes offline
       // keep lastKnown — offline turtle shows its last position in the list
@@ -223,6 +243,10 @@ function sendCmd(payload) {
 function updateDetailHeader() {
   const t = turtles.get(watchId);
   const d = t && t.data;
+  // TF-1: set accent square to the turtle's role color so couriers/fuelers
+  // show cyan/amber instead of the CSS-hardcoded chartreuse default.
+  const accent = document.getElementById("dAccent");
+  if (accent) accent.style.background = d ? roleColor(d.role) : "";
   let extra = "";
   if (d && d.role === "miner") {
     if (d.level != null) extra += ` · Y${d.level}`;
@@ -281,12 +305,14 @@ function refreshUpdateBtn() {
   if (!btn) return;
   const busy = Date.now() < updatingUntil && !allAtLatest();
   btn.disabled = busy;
-  btn.textContent = busy ? "⟳ updating…" : "⟳ update";
+  btn.textContent = busy ? "↻ updating…" : "↻ update";
   if (!busy) updatingUntil = 0;
 }
 document.querySelectorAll(".cmds button[data-cmd]").forEach((b) =>
   b.addEventListener("click", () => {
     sendCmd({ cmd: b.dataset.cmd });
+    const names = { start: "swarm started", pause: "swarm paused", resume: "swarm resumed", stop: "recall — turtles returning", update: "pushing firmware" };
+    if (names[b.dataset.cmd]) pushEvent(names[b.dataset.cmd], "cmd", "#C2F23A");
     if (b.dataset.cmd === "update") { updatingUntil = Date.now() + 120000; refreshUpdateBtn(); }
   })
 );
@@ -308,7 +334,7 @@ function fmtFuel(f) {
   if (f >= 1000) return (f / 1000).toFixed(f >= 100000 ? 0 : 1).replace(/\.0$/, "") + "k";
   return "" + f;
 }
-function roleColor(r) { return ROLE_COLOR[r] || "#8b97a7"; }
+function roleColor(r) { return ROLE_COLOR[r] || "#9FACAE"; }
 
 function fmtAgo(ts, now) {
   if (!ts) return "unknown";
@@ -319,52 +345,89 @@ function fmtAgo(ts, now) {
 }
 function offlineCardHtml(id, now) {
   const r = lastKnown[id] || {};
-  const c = roleColor(r.role);
+  const accent = roleColor(r.role);
   const ago = fmtAgo(r.ts, now);
-  // Coerce numerics before interpolation — prevents XSS if a compromised bridge
-  // sends a string with HTML special chars in a position/index field.
-  // safeId: id comes from Object.keys(lastKnown) so it is always a string; escape
-  // it for defense-in-depth in data-id and #id text nodes.
+  // Coerce numerics — defense-in-depth (mirrors online card)
   const safeId = esc(id);
   const px = r.pos ? Number(r.pos.x) : null;
   const py = r.pos ? Number(r.pos.y) : null;
   const pz = r.pos ? Number(r.pos.z) : null;
-  const posStr = (px != null && !Number.isNaN(px)) ? `X${px} Y${py} Z${pz}` : "pos unknown";
+  const posStr = (px != null && !Number.isNaN(px)) ? `X${px} Z${pz}${py != null ? ` · Y${py}` : ""}` : "pos unknown";
   const layer = r.level != null ? ` · Y${Number(r.level)}` : "";
-  const zone  = r.zoneIdx != null ? ` · zone ${Number(r.zoneIdx)}` : "";
-  return `<div class="card stale ${+id === watchId ? "sel" : ""}" data-id="${safeId}">
-    <span class="dot" style="background:${c};opacity:0.5"></span>
-    <div>
-      <span class="name" style="color:var(--dim)">${esc(r.label || ("#" + id))}</span>
-      <div class="sub">#${safeId} · offline · ${ago}${zone}${layer}</div>
-      <div class="sub" style="font-size:11px;color:#5a6472">${posStr}</div>
+  return `<div class="card stale ${+id === watchId ? "sel" : ""}" data-id="${safeId}" style="border-left-color:#45545A">
+    <div class="c-top">
+      <span class="dot" style="background:${accent};opacity:.5"></span>
+      <span class="name">${esc(r.label || ("#" + id))}</span>
+      <span class="cid">#${safeId} · offline · ${ago}${layer}</span>
     </div>
-    <div class="right" style="font-size:11px;color:var(--dim)">◌</div>
+    <div class="c-meta"><span class="c-pos">${posStr}</span></div>
   </div>`;
 }
+
+// ---- actionFor: what is each turtle doing right now ----------------
+function actionFor(d) {
+  const role = d.role, ph = (d.phase || "").toLowerCase();
+  const has = (...ks) => ks.some((k) => ph.includes(k));
+  const C = { signal: "#C2F23A", cyan: "#2FD4C8", amber: "#FFB23E", coral: "#FF5470", green: "#46E08A", slate: "#7C8B8E" };
+  const up = (s) => (s || "?").toUpperCase();
+  const yv = d.level != null ? d.level : (d.pos && d.pos.y);
+  if (has("pause", "idle", "stop", "wait")) return { a: "IDLE", d: "standby", col: C.slate, tone: C.slate, live: false };
+  if (has("evad", "hazard", "flee", "danger", "retreat")) return { a: "EVADING", d: "hazard ahead", col: C.coral, tone: C.coral, live: true };
+  if (role === "miner" && has("refuel", "fuel")) return { a: "REFUEL", d: "fuel low · to base", col: C.amber, tone: C.amber, live: true };
+  if (role === "miner") {
+    if (has("return", "deposit", "dump", "unload", "home", "drop")) return { a: "HAULING", d: "cargo · to base", col: C.cyan, tone: C.amber, live: true };
+    if (has("mine", "dig")) return { a: "MINING", d: (yv != null ? "Y" + yv : "") + (d.slot != null ? " · z" + d.slot : ""), col: C.signal, tone: C.green, live: true };
+    if (has("move", "transit", "travel", "goto", "descend", "shaft")) return { a: "TRANSIT", d: yv != null ? "Y" + yv : "in shaft", col: C.cyan, tone: C.green, live: true };
+    return { a: up(d.phase), d: yv != null ? "Y" + yv : "", col: C.signal, tone: C.green, live: true };
+  }
+  if (role === "courier") {
+    if (has("deliver", "return", "deposit")) return { a: "DELIVERING", d: "load · to base", col: C.cyan, tone: C.green, live: true };
+    if (has("fetch", "collect", "pickup", "goto")) return { a: "FETCHING", d: "to miner", col: C.cyan, tone: C.green, live: true };
+    return { a: up(d.phase), d: "", col: C.cyan, tone: C.green, live: true };
+  }
+  if (role === "fueler") {
+    if (has("fuel", "refuel", "deliver")) return { a: "FUELING", d: "delivering fuel", col: C.amber, tone: C.green, live: true };
+    if (has("patrol", "sweep")) return { a: "PATROL", d: "sweeping field", col: C.amber, tone: C.green, live: true };
+    return { a: up(d.phase), d: "", col: C.amber, tone: C.green, live: true };
+  }
+  return { a: up(d.phase), d: "", col: C.signal, tone: C.green, live: true };
+}
+
 function cardHtml(id, now) {
   const t = turtles.get(id), d = t.data;
   const stale = now - t.last > STALE_MS;
-  const c = roleColor(d.role);
+  const accent = roleColor(d.role);
   // Coerce numerics — prevents XSS if a forged/compromised bridge sends a string
-  // with HTML special chars where a number is expected (defense-in-depth, mirrors
-  // the offline card). After server fix R5-2, id is always an integer, but we
-  // still escape it here for defense-in-depth.
+  // with HTML special chars where a number is expected (defense-in-depth).
   const safeId = esc(id);
-  const slot = d.role === "miner" && d.slot != null ? " · zone " + Number(d.slot) : "";
-  // current mining layer (the server persists the deepest per zone)
-  const layer = d.role === "miner" && d.level != null ? " · Y" + Number(d.level) : "";
+  const act = actionFor(d);
   const inv = Number(d.inv) || 0;
-  const ver = d.ver
-    ? `<span class="ver ${d.ver !== meta.latest ? "vbad" : ""}">${esc(d.ver)}</span>` : "";
-  return `<div class="card ${stale ? "stale" : ""} ${id === watchId ? "sel" : ""}" data-id="${safeId}">
-    <span class="dot" style="background:${c}"></span>
-    <div>
+  const yv = d.role === "miner" && d.level != null ? Number(d.level) : (d.pos ? Number(d.pos.y) : null);
+  const px = d.pos ? Number(d.pos.x) : null;
+  const pz = d.pos ? Number(d.pos.z) : null;
+  const posStr = (px != null && !Number.isNaN(px)) ? `X${px} Z${pz}${yv != null ? ` · Y${yv}` : ""}` : "pos unknown";
+  const fuelLow = d.fuel !== "unlimited" && (+d.fuel) < 1500;
+  const verBad = d.ver && d.ver !== meta.latest;
+  const ver = d.ver ? `<span class="ver ${verBad ? "vbad" : ""}">v${esc(d.ver)}</span>` : "";
+  const liveDot = act.live && !stale ? " live" : "";
+  return `<div class="card ${stale ? "stale" : ""} ${id === watchId ? "sel" : ""}" data-id="${safeId}" style="border-left-color:${accent}">
+    <div class="c-top">
+      <span class="dot${liveDot}" style="background:${stale ? "#5E6E72" : act.tone}"></span>
       <span class="name">${esc(d.label || id)}</span>
-      <div class="sub">#${safeId} · ${esc(d.phase || "?")}${slot}${layer} ${ver}</div>
-      <div class="bar"><i style="width:${inv}%;background:${c}"></i></div>
+      <span class="cid">#${safeId}</span>
+      ${ver}
     </div>
-    <div class="right">⛽ ${fmtFuel(d.fuel)}<br>📦 ${inv}%</div>
+    <div class="c-action">
+      <span class="act" style="color:${stale ? "#7C8B8E" : act.col}">&rarr; ${stale ? "STALE" : esc(act.a)}</span>
+      <span class="act-d">${esc(act.d)}</span>
+    </div>
+    <div class="c-meta">
+      <span class="c-pos">${posStr}</span>
+      <span class="grow"></span>
+      <span class="c-fuel ${fuelLow ? "low" : ""}">fuel ${fmtFuel(d.fuel)}</span>
+      <span class="c-inv">load ${inv}%</span>
+    </div>
+    <div class="bar"><i style="width:${inv}%;background:${accent}"></i></div>
   </div>`;
 }
 function renderList() {
@@ -378,17 +441,17 @@ function renderList() {
     liveCount + " live" + (offCount ? ` · ${offCount} offline` : "");
   const groups = { miner: [], courier: [], fueler: [], other: [] };
   for (const id of ids) (groups[turtles.get(id).data.role] || groups.other).push(id);
-  const titles = { miner: "⛏ Miners", courier: "📦 Couriers", fueler: "⛽ Fuelers", other: "• Other" };
+  const titles = { miner: "MINERS", courier: "COURIERS", fueler: "FUELERS", other: "OTHER" };
   let html = "";
   for (const role of ["miner", "courier", "fueler", "other"]) {
     const g = groups[role];
     if (!g.length) continue;
     g.sort((a, b) => a - b);
-    html += `<div class="group" style="color:${roleColor(role)}">${titles[role]} · ${g.length}</div>`;
+    html += `<div class="group" style="color:${roleColor(role)}"><span class="gsw" style="background:${roleColor(role)}"></span>${titles[role]} <span class="gn">· ${g.length}</span></div>`;
     html += g.map((id) => cardHtml(id, now)).join("");
   }
   if (offlineIds.length) {
-    html += `<div class="group" style="color:var(--dim)">◌ Offline · ${offlineIds.length}</div>`;
+    html += `<div class="group" style="color:var(--faint)"><span class="gsw" style="background:#45545A"></span>OFFLINE <span class="gn">· ${offlineIds.length}</span></div>`;
     html += offlineIds.map(id => offlineCardHtml(id, now)).join("");
   }
   document.getElementById("list").innerHTML =
@@ -555,6 +618,12 @@ function renderMap() {
 
   function line(a, b, c2, d2) { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d2); ctx.stroke(); }
 
+  // Alternate render modes share the same world<->screen transform.
+  // TF-5: save/restore ctx state around each branch so any ctx mutations inside
+  // the mode functions cannot bleed into subsequent blocky-mode renders.
+  if (mapMode === "schematic") { ctx.save(); drawSchematic(ctx, w, h, X, Y, Xw, Yw); ctx.restore(); updateScaleBar(view.scale); return; }
+  if (mapMode === "heatmap")   { ctx.save(); drawHeatmap(ctx, w, h, X, Y); ctx.restore(); updateScaleBar(view.scale); return; }
+
   // ---- 1. TERRAIN BACKGROUND: per-chunk tint -------------------------
   // Terrain tint stays anchored to true Minecraft chunk boundaries (multiples
   // of 16) regardless of zone-lattice phase — it is pure visual texture.
@@ -642,12 +711,8 @@ function renderMap() {
     const labelEvery = step >= 60 ? 1 : step >= 20 ? 4 : step >= 8 ? 16 : 64;
 
     // Grid lines anchored to zone-lattice phase (phX, phZ).
-    // Starting screen position: find the first grid line >= left/top edge.
-    // X(phX) is the screen position of the phase origin; (X(phX) % step) gives
-    // the fractional offset, and we walk from there.
     ctx.strokeStyle = "#1e2530"; ctx.lineWidth = 0.8;
     for (let gx = (X(phX) % step + w * 2) % step; gx < w + step; gx += step) {
-      // True world X of this grid line: invert screen pos back to world, snap to lattice
       const worldX = Math.round((Xw(gx) - phX) / 16) * 16 + phX;
       if (worldX === 0) continue; // world-axis drawn separately below
       line(gx, 0, gx, h);
@@ -658,11 +723,11 @@ function renderMap() {
       line(0, gy, w, gy);
     }
 
-    // Axis highlights (X=0 and Z=0 world lines — not necessarily on the lattice)
+    // Axis highlights (X=0 and Z=0 world lines) — chartreuse/cyan palette
     const axisX = X(0), axisZ = Y(0);
-    ctx.strokeStyle = "rgba(63,185,80,0.25)"; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(194,242,58,0.22)"; ctx.lineWidth = 1.5;
     if (axisX >= 0 && axisX <= w) line(axisX, 0, axisX, h);
-    ctx.strokeStyle = "rgba(88,166,255,0.2)"; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(47,212,200,0.2)"; ctx.lineWidth = 1.5;
     if (axisZ >= 0 && axisZ <= h) line(0, axisZ, w, axisZ);
 
     // Coordinate labels on major grid lines (real world values)
@@ -675,7 +740,7 @@ function renderMap() {
         if (gx < 2 || gx > w - 2) continue;
         ctx.fillStyle = "rgba(11,14,19,0.75)";
         ctx.fillRect(gx + 2, 2, 34, 12);
-        ctx.fillStyle = worldX === 0 ? "rgba(63,185,80,0.9)" : "rgba(139,151,167,0.7)";
+        ctx.fillStyle = worldX === 0 ? "rgba(194,242,58,0.9)" : "rgba(139,151,167,0.7)";
         ctx.fillText("X" + Math.round(worldX), gx + 3, 3);
       }
       // Z labels along left edge
@@ -685,7 +750,7 @@ function renderMap() {
         if (gy < 8 || gy > h - 8) continue;
         ctx.fillStyle = "rgba(11,14,19,0.75)";
         ctx.fillRect(2, gy - 6, 34, 12);
-        ctx.fillStyle = worldZ === 0 ? "rgba(88,166,255,0.9)" : "rgba(139,151,167,0.7)";
+        ctx.fillStyle = worldZ === 0 ? "rgba(47,212,200,0.9)" : "rgba(139,151,167,0.7)";
         ctx.fillText("Z" + Math.round(worldZ), 3, gy);
       }
       ctx.textBaseline = "alphabetic";
@@ -693,22 +758,25 @@ function renderMap() {
   }
 
   // ---- 3. ZONES -------------------------------------------------------
-  // Every zone the server has on record (done / claimed / mined), drawn at its
-  // real spiral position. States: live (active miner) / done / partial (prog only).
   const liveZone = new Set();   // "siteKey:idx" currently being mined
   for (const [, t] of turtles) {
     const d = t.data;
     if (d.role === "miner" && d.site && d.slot != null)
       liveZone.add(`${d.site.x},${d.site.y},${d.site.z}:${d.slot}`);
   }
-  // cellPx: zone tile fills exactly one lattice cell (ZONE_SPREAD blocks wide).
-  // A 1px seam is subtracted in device-independent pixels so adjacent filled
-  // zones look like distinct cells rather than one solid block at high zoom.
   const cellPx = ZONE_SPREAD * view.scale - 1;
 
   // Animated pulse phase for live zones (cheap: uses Date.now, stable per frame)
   const pulseT = (Date.now() % 2000) / 2000; // 0-1 cycling ~2s
   const pulseMag = 0.5 + 0.5 * Math.sin(pulseT * Math.PI * 2); // 0-1
+
+  // strip-mining floor texture helper
+  const strips = (zx, zy) => {
+    if (cellPx < 8) return;
+    ctx.fillStyle = "rgba(5,7,7,0.5)";
+    for (let yy = zy + 3; yy < zy + cellPx - 2; yy += Math.max(3, cellPx / 6))
+      ctx.fillRect(zx + 1, yy, cellPx - 2, Math.max(1, view.scale));
+  };
 
   for (const [sk, zr] of Object.entries(zonesData)) {
     if (!zr) continue;
@@ -727,27 +795,25 @@ function renderMap() {
       const partial = !done && !live && zr.prog && zr.prog[idx] != null;
 
       if (live) {
-        // Bright dug-out fill + animated glow outline
-        ctx.fillStyle = "rgba(63,185,80,0.18)";
+        ctx.fillStyle = "rgba(194,242,58,0.10)";
         ctx.fillRect(zx, zy, cellPx, cellPx);
-        // Glow: soft outer shadow via compositing trick (shadowBlur on stroke)
-        const glowA = 0.55 + pulseMag * 0.35;
-        ctx.shadowColor = "rgba(63,185,80,0.6)";
-        ctx.shadowBlur = 8 + pulseMag * 6;
-        ctx.strokeStyle = `rgba(63,185,80,${glowA})`;
+        strips(zx, zy);
+        const glowA = 0.6 + pulseMag * 0.35;
+        ctx.shadowColor = "rgba(194,242,58,0.6)";
+        ctx.shadowBlur = 8 + pulseMag * 7;
+        ctx.strokeStyle = `rgba(194,242,58,${glowA})`;
         ctx.lineWidth = 1.8;
         ctx.strokeRect(zx, zy, cellPx, cellPx);
         ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
       } else if (done) {
-        // Clean dug-out dark fill, subtle green outline
-        ctx.fillStyle = "rgba(30,50,35,0.55)";
+        ctx.fillStyle = "rgba(20,30,18,0.55)";
         ctx.fillRect(zx, zy, cellPx, cellPx);
-        ctx.strokeStyle = "rgba(63,185,80,0.28)";
+        strips(zx, zy);
+        ctx.strokeStyle = "rgba(194,242,58,0.26)";
         ctx.lineWidth = 1;
         ctx.strokeRect(zx, zy, cellPx, cellPx);
       } else if (partial) {
-        // Hatched / abandoned
-        ctx.fillStyle = "rgba(20,24,32,0.45)";
+        ctx.fillStyle = "rgba(20,24,26,0.45)";
         ctx.fillRect(zx, zy, cellPx, cellPx);
         if (cellPx >= 4) {
           const pat = getHatchPattern(cellPx);
@@ -763,17 +829,19 @@ function renderMap() {
         ctx.lineWidth = 1;
         ctx.strokeRect(zx, zy, cellPx, cellPx);
       } else {
-        // claimed but no prog yet — faint placeholder
+        // claimed but no prog yet — faint dashed placeholder
         ctx.fillStyle = "rgba(139,151,167,0.04)";
         ctx.fillRect(zx, zy, cellPx, cellPx);
-        ctx.strokeStyle = "rgba(139,151,167,0.18)";
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = "rgba(139,151,167,0.2)";
         ctx.lineWidth = 1;
-        ctx.strokeRect(zx, zy, cellPx, cellPx);
+        ctx.strokeRect(zx + 0.5, zy + 0.5, cellPx - 1, cellPx - 1);
+        ctx.setLineDash([]);
       }
 
       // Zone label when zoomed in enough
       if (view.scale >= 1.4 && cellPx >= 14) {
-        const col = live ? "63,185,80" : done ? "63,185,80" : "139,151,167";
+        const col = live ? "194,242,58" : done ? "194,242,58" : "139,151,167";
         const alpha = live ? 0.95 : done ? 0.55 : 0.4;
         ctx.font = "9px ui-monospace, monospace";
         ctx.textBaseline = "top";
@@ -789,80 +857,60 @@ function renderMap() {
     }
   }
 
-  // ---- 4. ORES: soft radial glow dots --------------------------------
-  // Each ore is a radial-gradient circle that reads like a heatmap blob.
-  // createRadialGradient needs absolute screen coords, so we build per-dot.
-  // With the FIFO cap at 4000 and viewport culling this stays fast.
-  const oreR = Math.max(2.5, Math.min(7, view.scale * 1.4));
+  // ---- 4. ORES: blocky voxel cubes -----------------------------------
+  // Each ore is a small bevelled square so the field reads like Minecraft
+  // blocks rather than a soft heat blob. Rare ores get an emissive glow.
+  const oreB = Math.max(2, Math.min(12, view.scale * 0.9));
   for (const o of ores) {
     const ox = X(o.x), oy = Y(o.z);
-    if (ox < -oreR * 2 || ox > w + oreR * 2 || oy < -oreR * 2 || oy > h + oreR * 2) continue;
+    if (ox < -oreB || ox > w + oreB || oy < -oreB || oy > h + oreB) continue;
     const col = oreColor(o.n);
-    // Build a gradient centered at (ox, oy)
-    const g = ctx.createRadialGradient(ox, oy, 0, ox, oy, oreR * 2);
-    // Parse colour to rgba (oreColor returns hex strings like "#4ee6e6")
-    g.addColorStop(0,   hexToRgba(col, 0.92));
-    g.addColorStop(0.4, hexToRgba(col, 0.55));
-    g.addColorStop(1,   hexToRgba(col, 0));
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(ox, oy, oreR * 2, 0, Math.PI * 2); ctx.fill();
+    const bx = ox - oreB / 2, by = oy - oreB / 2;
+    if (RARE_ORE.has(o.n)) { ctx.shadowColor = col; ctx.shadowBlur = 8; }
+    ctx.fillStyle = col;
+    ctx.fillRect(bx, by, oreB, oreB);
+    ctx.shadowBlur = 0;
+    const e = Math.max(1, oreB * 0.22);
+    ctx.fillStyle = "rgba(255,255,255,0.30)"; ctx.fillRect(bx, by, oreB, e);
+    ctx.fillStyle = "rgba(0,0,0,0.34)"; ctx.fillRect(bx, by + oreB - e, oreB, e);
   }
 
-  // ---- 4b. HAZARDS (lava_lake / spawner / cavern) ---------------------
-  // Drawn above ores; viewport-culled. Each type has a distinct shape.
-  // ctx state is fully reset after this block so nothing bleeds into later layers.
+  // ---- 4b. HAZARDS — loud, pulsing alert markers ----------------------
+  // Hazards must be impossible to miss: a pulsing alert ring + a glowing
+  // diamond + a bang glyph + an always-on colour-coded label.
   if (hazardsData.length) {
     ctx.save();
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
-    const hazR = Math.max(3, Math.min(9, view.scale * 1.6)); // marker radius in px
-
+    const pulse = 1 + 0.25 * Math.sin(Date.now() / 180);
+    const hazR = Math.max(7, Math.min(16, view.scale * 1.9));
     for (const hz of hazardsData) {
       if (!hz.pos) continue;
       const hx = X(hz.pos.x), hy = Y(hz.pos.z);
-      // Cull to viewport with margin
-      const margin = hazR * 3;
+      const margin = hazR * 4;
       if (hx < -margin || hx > w + margin || hy < -margin || hy > h + margin) continue;
-
-      if (hz.hazard === "lava_lake") {
-        // Red filled circle with orange edge glow
-        ctx.fillStyle = "rgba(248,81,73,0.85)";
-        ctx.strokeStyle = "rgba(255,140,0,0.6)";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(hx, hy, hazR, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-      } else if (hz.hazard === "spawner") {
-        // Orange triangle pointing up
-        const s = hazR * 1.3;
-        ctx.fillStyle = "rgba(210,153,34,0.85)";
-        ctx.strokeStyle = "rgba(255,200,60,0.6)";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.moveTo(hx, hy - s);
-        ctx.lineTo(hx + s * 0.87, hy + s * 0.5);
-        ctx.lineTo(hx - s * 0.87, hy + s * 0.5);
-        ctx.closePath();
-        ctx.fill(); ctx.stroke();
-      } else {
-        // cavern (and any unknown type) — grey hollow rect
-        const s = hazR * 1.1;
-        ctx.strokeStyle = "rgba(139,151,167,0.75)";
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(hx - s, hy - s, s * 2, s * 2);
-      }
-
-      // Small label when zoomed in enough
-      if (view.scale >= 1.2) {
-        ctx.font = "9px ui-monospace, monospace";
-        ctx.textBaseline = "top";
-        const lbl = hz.hazard || "hazard";
-        ctx.fillStyle = "rgba(8,11,16,0.75)";
-        ctx.fillText(lbl, hx + hazR + 2, hy - 4);
-        ctx.fillStyle = hz.hazard === "lava_lake" ? "rgba(248,81,73,0.9)"
-                      : hz.hazard === "spawner"   ? "rgba(210,153,34,0.9)"
-                      :                             "rgba(139,151,167,0.9)";
-        ctx.fillText(lbl, hx + hazR + 3, hy - 5);
-        ctx.textBaseline = "alphabetic";
+      const col = hz.hazard === "lava_lake" ? "#FF5A2E"
+                : hz.hazard === "spawner"   ? "#FFB23E" : "#9B8CFF";
+      // pulsing alert ring
+      ctx.strokeStyle = hexToRgba(col, 0.5); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(hx, hy, hazR * pulse, 0, Math.PI * 2); ctx.stroke();
+      // glowing diamond
+      ctx.save();
+      ctx.translate(hx, hy); ctx.rotate(Math.PI / 4);
+      ctx.shadowColor = col; ctx.shadowBlur = 14; ctx.fillStyle = col;
+      ctx.fillRect(-hazR / 2, -hazR / 2, hazR, hazR);
+      ctx.restore(); ctx.shadowBlur = 0;
+      // bang glyph
+      ctx.fillStyle = "#07090A";
+      ctx.font = "700 " + Math.max(10, hazR) + "px JetBrains Mono, monospace";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("!", hx, hy + 0.5);
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+      // label chip
+      if (view.scale >= 1) {
+        const lbl = hazardLabel(hz.hazard);
+        ctx.font = "10px JetBrains Mono, monospace";
+        const tw = ctx.measureText(lbl).width;
+        ctx.fillStyle = "rgba(7,9,10,0.82)"; ctx.fillRect(hx + hazR + 2, hy - 7, tw + 6, 14);
+        ctx.fillStyle = col; ctx.fillText(lbl, hx + hazR + 5, hy + 3);
       }
     }
     ctx.restore();
@@ -875,14 +923,12 @@ function renderMap() {
     const px = X(r.pos.x), py = Y(r.pos.z);
     if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
     const c = roleColor(r.role);
-    // Dim shadow under dot
     ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 4;
     ctx.globalAlpha = 0.28;
     ctx.fillStyle = c;
     ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
     ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
     ctx.globalAlpha = 0.4;
-    ctx.fillStyle = "#8b97a7";
     // Text halo
     ctx.fillStyle = "rgba(8,11,16,0.7)";
     ctx.fillText(`${r.label || ("#" + sid)} †`, px + 6, py + 5);
@@ -892,17 +938,13 @@ function renderMap() {
   }
 
   // ---- 6. TURTLE TRAILS (client-side ring buffer, = recent dig path) ----
-  // Each line segment is slightly thicker and more opaque than before so
-  // it reads clearly as "where this miner has been digging".
   for (const [id, t] of pts) {
     const trail = trailBufs.get(id);
     if (!trail || trail.len < 2) continue;
     const c = roleColor(t.data.role);
-    // Draw oldest→newest as a fading polyline
     ctx.lineWidth = 1.8;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    // Walk the ring buffer in chronological order
     let prevPx = null, prevPy = null;
     for (let i = 0; i < trail.len; i++) {
       const bufIdx = (trail.head - trail.len + i + TRAIL_LEN) % TRAIL_LEN;
@@ -910,7 +952,6 @@ function renderMap() {
       if (!pt) continue;
       const px = X(pt.x), py = Y(pt.z);
       if (prevPx != null) {
-        // Fade from ~0 at oldest to 0.6 at newest (was 0.45) — more visible dig path
         const alpha = (i / trail.len) * 0.6;
         ctx.strokeStyle = hexToRgba(c, alpha);
         ctx.beginPath(); ctx.moveTo(prevPx, prevPy); ctx.lineTo(px, py); ctx.stroke();
@@ -921,10 +962,6 @@ function renderMap() {
   }
 
   // ---- 6b. ASSIGNMENT LINKS: faint connector from each live miner to its zone center ----
-  // A miner may be outside its zone tile (shaft transit or vein chase) — the line
-  // makes the assignment unambiguous even when the dot is far from the box.
-  // Only drawn for miners that report both d.site and d.slot.
-  // Culled when both endpoints are off-screen.
   {
     ctx.save();
     ctx.lineWidth = 1;
@@ -938,7 +975,6 @@ function renderMap() {
       const sk = `${d.site.x},${d.site.y},${d.site.z}`;
       const zp = zonePos(sk, d.slot);
       const zx = X(zp.x), zy = Y(zp.z);
-      // Cull: skip if both endpoints are outside the viewport (with margin)
       const margin = 20;
       const turtleOff = px < -margin || px > w + margin || py < -margin || py > h + margin;
       const zoneOff   = zx < -margin || zx > w + margin || zy < -margin || zy > h + margin;
@@ -951,16 +987,15 @@ function renderMap() {
     ctx.restore();
   }
 
-  // ---- 7. LIVE TURTLES -----------------------------------------------
+  // ---- 7. LIVE TURTLES — voxel blocks with orientation nub -----------
   const now = Date.now();
-  const SHAFT_RADIUS = ZONE_SPREAD / 2; // blocks; within this XZ distance from site center = shaft transit
+  const SHAFT_RADIUS = ZONE_SPREAD / 2;
   for (const [id, t] of pts) {
     const d = t.data, p = d.pos;
     const px = X(p.x), py = Y(p.z);
     const stale = now - t.last > STALE_MS;
     const c = roleColor(d.role);
 
-    // Determine if this miner is in the shared shaft (XZ near site center)
     let inShaft = false;
     if (d.role === "miner" && d.site) {
       const dx = Math.abs(p.x - d.site.x);
@@ -970,40 +1005,49 @@ function renderMap() {
 
     ctx.globalAlpha = stale ? 0.4 : 1;
 
+    // voxel marker — a bevelled cube, role-coloured, dark core.
+    const vs = Math.max(7, Math.min(16, view.scale * 1.7)), vh = vs / 2;
+    // active-mining pulse ring (miners working a face, not in shaft)
+    if (d.role === "miner" && !inShaft && !stale) {
+      const ph = (Date.now() % 1200) / 1200;
+      ctx.strokeStyle = hexToRgba(c, Math.max(0, 0.3 - ph * 0.3));
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(px, py, vh + 2 + ph * 8, 0, Math.PI * 2); ctx.stroke();
+    }
     if (inShaft) {
-      // Shaft-transit marker: hollow ring (no filled dot) so the center cluster
-      // reads as "in the shaft," not "out of bounds."
-      ctx.shadowColor = "rgba(0,0,0,0.7)";
-      ctx.shadowBlur = 6;
-      // Outer hollow ring
-      ctx.strokeStyle = c;
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.stroke();
-      // Second inner dashed ring to suggest vertical motion
+      // hollow ring = in the shared shaft (vertical transit)
+      ctx.shadowColor = "rgba(0,0,0,0.7)"; ctx.shadowBlur = 6;
+      ctx.strokeStyle = c; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, vh, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([2, 2]);
-      ctx.strokeStyle = hexToRgba(c, 0.55);
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = hexToRgba(c, 0.55); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(px, py, vh * 0.55, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
-      ctx.lineWidth = 1;
+      ctx.shadowBlur = 0; ctx.shadowColor = "transparent"; ctx.lineWidth = 1;
     } else {
-      // Normal filled dot
-      ctx.shadowColor = "rgba(0,0,0,0.7)";
-      ctx.shadowBlur = 6;
+      ctx.shadowColor = "rgba(0,0,0,0.6)"; ctx.shadowBlur = 6;
       ctx.fillStyle = c;
-      ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+      roundRect(ctx, px - vh, py - vh, vs, vs, Math.max(1, vs * 0.18)); ctx.fill();
       ctx.shadowBlur = 0; ctx.shadowColor = "transparent";
-
-      // Dark inner pupil
-      ctx.fillStyle = "#080b10";
-      ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+      // top highlight + dark core
+      ctx.fillStyle = "rgba(255,255,255,0.30)"; ctx.fillRect(px - vh, py - vh, vs, Math.max(1, vs * 0.16));
+      ctx.fillStyle = "rgba(7,9,10,0.45)"; const inn = vs * 0.42; ctx.fillRect(px - inn / 2, py - inn / 2, inn, inn);
+      // heading nub inferred from recent trail direction
+      const tb = trailBufs.get(id);
+      if (tb && tb.len >= 2) {
+        const a = tb.buf[(tb.head - 1 + TRAIL_LEN) % TRAIL_LEN];
+        const b2 = tb.buf[(tb.head - 2 + TRAIL_LEN) % TRAIL_LEN];
+        if (a && b2 && (a.x !== b2.x || a.z !== b2.z)) {
+          const dx = Math.sign(a.x - b2.x), dz = Math.sign(a.z - b2.z);
+          const n = Math.max(2, vs * 0.26);
+          ctx.fillStyle = c;
+          ctx.fillRect(px + dx * vh - n / 2, py + dz * vh - n / 2, n, n);
+        }
+      }
     }
 
     ctx.globalAlpha = 1;
 
-    // Label with text halo for legibility.
-    // Shaft-transiting miners get a "(shaft)" suffix so the center cluster reads clearly.
     const suffix = inShaft ? " (shaft)" : "";
     const label = `${d.label || ("#" + id)} y${p.y}${suffix}`;
     ctx.font = "11px ui-monospace, monospace";
@@ -1017,63 +1061,119 @@ function renderMap() {
     ctx.globalAlpha = 1;
   }
 
-  // ---- 8. ORIGIN MARKER (0,0) ----------------------------------------
+  // ---- 8. BASE / ORIGIN MARKER (0,0) — chartreuse "BASE" block ------
   const ox0 = X(0), oz0 = Y(0);
-  if (ox0 > -10 && ox0 < w + 10 && oz0 > -10 && oz0 < h + 10) {
-    ctx.globalAlpha = 0.7;
-    // Cross hairs
-    ctx.strokeStyle = "#3fb950"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(ox0 - 5, oz0); ctx.lineTo(ox0 + 5, oz0); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(ox0, oz0 - 5); ctx.lineTo(ox0, oz0 + 5); ctx.stroke();
-    // Small ring
-    ctx.strokeStyle = "#3fb950"; ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.arc(ox0, oz0, 4, 0, Math.PI * 2); ctx.stroke();
-    // Label
-    ctx.font = "9px ui-monospace, monospace";
-    ctx.textBaseline = "top";
-    ctx.fillStyle = "rgba(8,11,16,0.7)"; ctx.fillText("0,0", ox0 + 6, oz0 + 2);
-    ctx.fillStyle = "rgba(63,185,80,0.8)"; ctx.fillText("0,0", ox0 + 7, oz0 + 3);
+  if (ox0 > -14 && ox0 < w + 14 && oz0 > -14 && oz0 < h + 14) {
+    const bs = Math.max(10, view.scale * 2.4);
+    ctx.fillStyle = "rgba(14,42,36,0.7)";
+    ctx.fillRect(ox0 - bs / 2, oz0 - bs / 2, bs, bs);
+    ctx.strokeStyle = "#C2F23A"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(ox0 - bs / 2 + 0.5, oz0 - bs / 2 + 0.5, bs - 1, bs - 1);
+    ctx.fillStyle = "#C2F23A"; const m = bs * 0.32;
+    ctx.fillRect(ox0 - m / 2, oz0 - m / 2, m, m);
+    ctx.font = "600 9px JetBrains Mono, monospace"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(7,9,10,0.8)"; ctx.fillText("BASE", ox0 + bs / 2 + 6, oz0 + 1);
+    ctx.fillStyle = "#C2F23A"; ctx.fillText("BASE", ox0 + bs / 2 + 5, oz0);
     ctx.textBaseline = "alphabetic";
-    ctx.globalAlpha = 1;
   }
 
-  // ---- 9. MAP LEGEND (bottom-left corner of canvas) -----------------
-  // Small key so the visual annotations are self-explaining without opening docs.
-  {
-    const lx = 8, ly = h - 8;
-    ctx.save();
-    ctx.font = "9px ui-monospace, monospace";
-    ctx.textBaseline = "alphabetic";
-
-    const items = [
-      { col: "rgba(139,151,167,0.55)", text: "-- -  assignment to zone" },
-      { col: "rgba(63,185,80,0.55)",   text: "trail = recent dig path" },
-      { col: "rgba(139,151,167,0.55)", text: "○  shaft transit" },
-      { col: "rgba(248,81,73,0.75)",   text: "●  lava lake hazard" },
-      { col: "rgba(210,153,34,0.75)",  text: "▲  spawner hazard" },
-      { col: "rgba(139,151,167,0.75)", text: "□  cavern hazard" },
-    ];
-    const lineH = 13;
-    for (let i = 0; i < items.length; i++) {
-      const iy = ly - (items.length - 1 - i) * lineH;
-      ctx.fillStyle = "rgba(8,11,16,0.65)";
-      ctx.fillRect(lx - 1, iy - 10, 168, 12);
-      ctx.fillStyle = items[i].col;
-      ctx.fillText(items[i].text, lx, iy);
-    }
-    ctx.restore();
-  }
-
-  // Update HTML overlay (scale bar)
+  // (canvas legend removed — superseded by HTML #roleLegend + #legend overlays)
   updateScaleBar(view.scale);
 }
 
+// Rounded rectangle path helper (used for voxel turtle markers)
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
 // Hex colour (#rrggbb or #rgb) -> "rgba(r,g,b,a)"
 function hexToRgba(hex, a) {
   let h = hex.replace("#", "");
   if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
   const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
   return `rgba(${r},${g},${b},${a})`;
+}
+
+// Build the set of "siteKey:idx" zones with a live miner (shared by alt modes).
+function liveZoneSet() {
+  const s = new Set();
+  for (const [, t] of turtles) {
+    const d = t.data;
+    if (d.role === "miner" && d.site && d.slot != null) s.add(`${d.site.x},${d.site.y},${d.site.z}:${d.slot}`);
+  }
+  return s;
+}
+function zoneIdxSet(zr) {
+  const idxs = new Set();
+  for (const k of Object.keys(zr.done || {})) idxs.add(+k);
+  for (const c of Object.values(zr.claims || {})) idxs.add(c.idx);
+  for (const k of Object.keys(zr.prog || {})) idxs.add(+k);
+  return idxs;
+}
+
+// ---- MAP MODE: schematic (blueprint) ---------------------------------
+function drawSchematic(ctx, w, h, X, Y, Xw, Yw) {
+  ctx.fillStyle = "#0A0D0E"; ctx.fillRect(0, 0, w, h);
+  ctx.textBaseline = "alphabetic";
+  const cx0 = Math.floor(Xw(0) / 16) - 1, cx1 = Math.floor(Xw(w) / 16) + 1;
+  const cz0 = Math.floor(Yw(0) / 16) - 1, cz1 = Math.floor(Yw(h) / 16) + 1;
+  ctx.strokeStyle = "rgba(47,212,200,0.09)"; ctx.lineWidth = 1;
+  for (let gx = cx0; gx <= cx1; gx++) { const sx = X(gx * 16); ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, h); ctx.stroke(); }
+  for (let gz = cz0; gz <= cz1; gz++) { const sy = Y(gz * 16); ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(w, sy); ctx.stroke(); }
+  const live = liveZoneSet();
+  const cell = 16 * view.scale;
+  for (const [sk, zr] of Object.entries(zonesData)) {
+    if (!zr) continue;
+    for (const idx of zoneIdxSet(zr)) {
+      const p = zonePos(sk, idx);
+      const L = X(p.x) - cell / 2, T = Y(p.z) - cell / 2;
+      if (L + cell < 0 || L > w || T + cell < 0 || T > h) continue;
+      const isLive = live.has(`${sk}:${idx}`), done = !!(zr.done && zr.done[idx]);
+      if (isLive) { ctx.fillStyle = "rgba(194,242,58,0.06)"; ctx.fillRect(L, T, cell, cell); ctx.strokeStyle = "#C2F23A"; ctx.lineWidth = 1.2; ctx.strokeRect(L + 0.5, T + 0.5, cell - 1, cell - 1); }
+      else if (done) { ctx.strokeStyle = "rgba(47,212,200,0.4)"; ctx.lineWidth = 1; ctx.strokeRect(L + 0.5, T + 0.5, cell - 1, cell - 1); }
+      else { ctx.strokeStyle = "rgba(139,151,167,0.25)"; ctx.lineWidth = 1; ctx.setLineDash([3, 4]); ctx.strokeRect(L + 0.5, T + 0.5, cell - 1, cell - 1); ctx.setLineDash([]); }
+      if (view.scale >= 1.4 && cell >= 14) { ctx.font = "9px JetBrains Mono, monospace"; ctx.fillStyle = isLive ? "rgba(194,242,58,0.9)" : "rgba(139,151,167,0.6)"; ctx.fillText("z" + idx, L + 3, T + 11); }
+    }
+  }
+  for (const o of ores) { const ox = X(o.x), oy = Y(o.z); if (ox < 0 || ox > w || oy < 0 || oy > h) continue; ctx.fillStyle = hexToRgba(oreColor(o.n), RARE_ORE.has(o.n) ? 0.95 : 0.45); const s = Math.max(1.5, view.scale * 0.4); ctx.fillRect(ox - s / 2, oy - s / 2, s, s); }
+  // base crosshair
+  ctx.strokeStyle = "#C2F23A"; ctx.lineWidth = 1.4; const bs = Math.max(9, view.scale * 2.4);
+  ctx.strokeRect(X(0) - bs / 2, Y(0) - bs / 2, bs, bs);
+  ctx.beginPath(); ctx.moveTo(X(0) - bs, Y(0)); ctx.lineTo(X(0) + bs, Y(0)); ctx.moveTo(X(0), Y(0) - bs); ctx.lineTo(X(0), Y(0) + bs); ctx.stroke();
+  for (const [id, t] of turtles) {
+    const d = t.data; if (!d.pos) continue;
+    const px = X(d.pos.x), py = Y(d.pos.z), col = roleColor(d.role), r = Math.max(5, view.scale * 0.9);
+    ctx.strokeStyle = col; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px - r - 2, py); ctx.lineTo(px + r + 2, py); ctx.moveTo(px, py - r - 2); ctx.lineTo(px, py + r + 2); ctx.stroke();
+    if (view.scale >= 1.2) { ctx.font = "10px JetBrains Mono, monospace"; ctx.fillStyle = "#9FACAE"; ctx.fillText(d.label || ("#" + id), px + r + 4, py + 3); }
+  }
+  for (const hz of hazardsData) { if (!hz.pos) continue; const hx = X(hz.pos.x), hy = Y(hz.pos.z), r = Math.max(7, view.scale * 1.2); ctx.strokeStyle = "#FF5470"; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(hx - r, hy - r); ctx.lineTo(hx + r, hy + r); ctx.moveTo(hx + r, hy - r); ctx.lineTo(hx - r, hy + r); ctx.stroke(); }
+}
+
+// ---- MAP MODE: heatmap (ore density) ---------------------------------
+function drawHeatmap(ctx, w, h, X, Y) {
+  ctx.fillStyle = "#050707"; ctx.fillRect(0, 0, w, h);
+  ctx.textBaseline = "alphabetic";
+  const cell = 16 * view.scale;
+  for (const [sk, zr] of Object.entries(zonesData)) {
+    if (!zr) continue;
+    for (const idx of zoneIdxSet(zr)) { const p = zonePos(sk, idx); const L = X(p.x) - cell / 2, T = Y(p.z) - cell / 2; ctx.strokeStyle = "rgba(47,59,65,0.5)"; ctx.lineWidth = 1; ctx.strokeRect(L + 0.5, T + 0.5, cell - 1, cell - 1); }
+  }
+  const CELL = 4, bins = new Map();
+  for (const o of ores) { const binCx = Math.floor(o.x / CELL), binCz = Math.floor(o.z / CELL); const k = binCx + "," + binCz; const e = bins.get(k) || { c: 0, r: 0 }; e.c++; if (RARE_ORE.has(o.n)) e.r++; bins.set(k, e); }
+  let maxc = 1; for (const e of bins.values()) maxc = Math.max(maxc, e.c);
+  const heat = (tn) => tn < 0.34 ? `rgba(194,242,58,${0.18 + tn * 0.7})` : tn < 0.67 ? `rgba(255,178,62,${0.34 + tn * 0.4})` : `rgba(255,84,112,${0.5 + tn * 0.45})`;
+  for (const [k, e] of bins) { const p = k.split(",").map(Number); const px = X(p[0] * CELL), py = Y(p[1] * CELL); const tn = e.r > 0 ? Math.min(1, 0.7 + e.c / maxc) : e.c / maxc; ctx.fillStyle = heat(tn); ctx.fillRect(px, py, CELL * view.scale + 0.6, CELL * view.scale + 0.6); }
+  const bs = Math.max(9, view.scale * 2.2); ctx.strokeStyle = "#C2F23A"; ctx.lineWidth = 1.4; ctx.strokeRect(X(0) - bs / 2, Y(0) - bs / 2, bs, bs);
+  for (const [id, t] of turtles) { const d = t.data; if (!d.pos) continue; const px = X(d.pos.x), py = Y(d.pos.z); ctx.fillStyle = "#EBEFEF"; ctx.strokeStyle = "#07090A"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(px, py, Math.max(3, view.scale * 0.6), 0, Math.PI * 2); ctx.fill(); ctx.stroke(); if (view.scale >= 1.2) { ctx.font = "10px JetBrains Mono, monospace"; ctx.fillStyle = "#DBE2E2"; ctx.fillText(d.label || ("#" + id), px + 8, py + 3); } }
+  const pulse = 1 + 0.25 * Math.sin(Date.now() / 180);
+  for (const hz of hazardsData) { if (!hz.pos) continue; const hx = X(hz.pos.x), hy = Y(hz.pos.z), hazR = Math.max(7, Math.min(16, view.scale * 1.9)); const col = hz.hazard === "lava_lake" ? "#FF5A2E" : hz.hazard === "spawner" ? "#FFB23E" : "#9B8CFF"; ctx.strokeStyle = hexToRgba(col, 0.6); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(hx, hy, hazR * pulse, 0, Math.PI * 2); ctx.stroke(); ctx.save(); ctx.translate(hx, hy); ctx.rotate(Math.PI / 4); ctx.shadowColor = col; ctx.shadowBlur = 12; ctx.fillStyle = col; ctx.fillRect(-hazR / 2, -hazR / 2, hazR, hazR); ctx.restore(); ctx.shadowBlur = 0; }
 }
 
 // ---- F4: Stats panel --------------------------------------------------
@@ -1140,7 +1240,82 @@ function renderLegend() {
     `<div class="row tot"><span class="n">found</span><span class="c">${ores.length}</span></div>`;
 }
 
-function render() { trailPrune(); renderList(); renderMap(); renderLegend(); renderStats(); refreshUpdateBtn(); }
+// ---- event feed (synthesised client-side) ---------------------------
+// NOTE: function declaration (hoisted) — called from the WS hazards handler above;
+// do NOT convert to const/arrow or move below the call site.
+function hazardLabel(h) {
+  return h === "lava_lake" ? "lava lake" : h === "spawner" ? "spawner"
+       : h === "cavern" ? "cavern" : (h || "hazard");
+}
+function fmtAgoShort(ts, now) {
+  const s = Math.round((now - ts) / 1000);
+  if (s < 60) return s + "s"; if (s < 3600) return Math.round(s / 60) + "m";
+  return Math.round(s / 3600) + "h";
+}
+function pushEvent(text, kind, color) {
+  events.unshift({ id: ++eventSeq, ts: Date.now(), text, kind, color: color || "#C2F23A" });
+  if (events.length > EVENT_CAP) events.length = EVENT_CAP;
+  renderEvents();
+}
+function renderEvents() {
+  const track = document.getElementById("eventTrack");
+  if (!track) return;
+  if (!events.length) { track.innerHTML = '<span class="el-empty">$ waiting for swarm events…</span>'; return; }
+  const now = Date.now();
+  track.innerHTML = events.map((e) => {
+    const haz = e.kind === "hazard";
+    return `<div class="ev${haz ? " haz" : ""}"><span class="ev-ago">${fmtAgoShort(e.ts, now)}</span>` +
+      `<div class="ev-body"><span class="ev-dot" style="background:${e.color}"></span>` +
+      `<span class="ev-txt">${esc(e.text)}</span></div></div>`;
+  }).join("");
+}
+
+// ---- KPI ribbon -----------------------------------------------------
+function renderKpis() {
+  const el = document.getElementById("kpiRibbon");
+  if (!el) return;
+  const now = Date.now();
+  let miners = 0, fuelSum = 0, fuelN = 0;
+  for (const [, t] of turtles) {
+    const d = t.data;
+    if (d.role === "miner") miners++;
+    if (d.fuel !== "unlimited") { const f = +d.fuel; if (!Number.isNaN(f)) { fuelSum += f; fuelN++; } }
+  }
+  const avgFuel = fuelN ? Math.round(fuelSum / fuelN) : 0;
+  let done = 0, active = 0;
+  for (const z of Object.values(zonesData)) {
+    if (!z) continue;
+    if (z.done) done += Object.keys(z.done).length;
+    if (z.claims) active += Object.keys(z.claims).length;
+  }
+  let sessYield = 0, rate = 0;
+  if (statsData && statsData.session) {
+    sessYield = Object.values(statsData.session.ores || {}).reduce((a, b) => a + b, 0);
+    const h = Math.max(1 / 60, (now - new Date(statsData.session.start).getTime()) / 3600000);
+    rate = Math.round(sessYield / h);
+  }
+  const cells = [
+    { l: "live miners", v: miners, u: "rigs", c: "var(--signal)" },
+    { l: "ore / hour", v: rate, u: "blk", c: "var(--cyan)" },
+    { l: "session yield", v: sessYield, u: "blk", c: "var(--strong)" },
+    { l: "zones cleared", v: done, u: active ? (active + " live") : "", c: "var(--strong)" },
+    { l: "avg fuel", v: fmtFuel(avgFuel), u: "", c: (avgFuel && avgFuel < 3000) ? "var(--amber)" : "var(--strong)" },
+  ];
+  el.innerHTML = cells.map((k) =>
+    `<div class="kpi"><span class="kpi-l">${k.l}</span>` +
+    `<span class="kpi-v" style="color:${k.c}">${esc(k.v)}${k.u ? `<small>${esc(k.u)}</small>` : ""}</span></div>`).join("");
+}
+
+// ---- map mode switch ------------------------------------------------
+document.querySelectorAll("#mapModes button[data-mode]").forEach((b) =>
+  b.addEventListener("click", () => {
+    mapMode = b.dataset.mode;
+    document.querySelectorAll("#mapModes button").forEach((x) => x.classList.toggle("on", x === b));
+    renderMap();
+  })
+);
+
+function render() { trailPrune(); renderList(); renderMap(); renderLegend(); renderStats(); renderKpis(); renderEvents(); refreshUpdateBtn(); }
 
 fit(); lockUI(); connect();
 setInterval(render, 1000); // refresh stale fades + ages
