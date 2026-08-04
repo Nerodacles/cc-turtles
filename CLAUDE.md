@@ -22,8 +22,13 @@ La documentación funcional completa está en `README.md` — leerlo antes de ra
 **Tu trabajo NO es escribir el código final.** Diseñas, decides y **delegas a los agentes especialistas**. Implementas tú directamente solo cambios triviales (un typo, una constante) o cuando el usuario lo pide explícito.
 
 ### Política de modelos (obligatoria)
-- **El arquitecto (esta sesión) usa Opus.** Es el único que puede.
-- **Todos los agentes corren SIEMPRE en Sonnet.** Cada definición en `.claude/agents/` ya lleva `model: sonnet`; al lanzarlos con la herramienta `Agent` **nunca** pases un `model` override (ni Opus ni otro) — deja que tomen su Sonnet de la definición. Si creas un agente nuevo en este repo, ponle `model: sonnet`.
+- **El arquitecto (esta sesión) usa Opus.**
+- **El modelo lo manda la definición del agente, no la llamada.** Cada archivo de `.claude/agents/` lleva su `model:` en el frontmatter; al lanzarlos con la herramienta `Agent` **nunca** pases un `model` override — deja que tomen el suyo.
+- **Usa siempre el alias en pelado** (`opus`, `sonnet`), nunca un ID fijado tipo `claude-opus-5`: el alias resuelve automáticamente a la versión más reciente de esa familia; el ID lo congela.
+- **Reparto actual:**
+  - `opus` — `turtle-swarm-techlead` (descomposición y dimensionado de equipo) y `swarm-code-auditor` (caza adversarial de bugs e interacciones rotas entre capas). Son los dos roles de juicio, no de ejecución acotada.
+  - `sonnet` — el resto: `cc-turtle-lua-engineer`, `turtle-web-dashboard-engineer`, `web-k8s-devops`, `turtle-docs-researcher`. Trabajo acotado y verificable.
+- **Si creas un agente nuevo en este repo:** `sonnet` por defecto. Súbelo a `opus` solo si su trabajo es diseño abierto, descomposición o auditoría adversarial.
 
 ### Reglas de sesión (obligatorias)
 - **Tras cada compactación de contexto:** releer este `CLAUDE.md` y el raíz antes de seguir.
@@ -83,7 +88,8 @@ Guardas en `C:\Users\nero\.claude\projects\C--Users-nero-Desktop-K8s-mc\memory\`
 
 ## Flujo de cambios
 > ⚠️ **Este repo NO está en ArgoCD.** Un `git push` **no** aplica los manifiestos al clúster por sí solo. No asumas reconciliación automática.
-- **Código del server.js** → `git commit + push`; el pod **no-build** re-clona `main` y corre `server.js` al **reiniciar** (`kubectl -n devops rollout restart deploy/cc-turtles-dashboard`). El push solo no basta: hay que reiniciar el pod.
+- **Código del server.js** → `git commit + push`; el pod **no-build** re-clona `main` y corre `server.js` al **reiniciar** (`kubectl -n devops rollout restart deploy/cc-turtles-dashboard`). El push solo no basta: hay que reiniciar el pod — sin esperar a que lo pidan. La estrategia es `Recreate`: esperar a que solo quede el pod nuevo `1/1 Running` y verificar la versión servida con `kubectl -n devops exec deploy/cc-turtles-dashboard -- sh -c "tail -1 /app/repo/lib/version.lua"`. Commits que solo tocan código de turtles (`miner/`, `courier/`, `bridge/`, etc.) no necesitan restart del pod.
 - **Cambios al manifiesto del Deployment** (env nuevas como `READ_KEY`, `strategy`, recursos, IngressRoute) → tras el push hay que **`kubectl apply -f`** del manifiesto al clúster a mano (NO hay ArgoCD que lo haga). Las env del pod se leen del Deployment aplicado, no del clon de `main`.
 - **Prueba/experimento** → `kubectl patch`/`apply` directo; subir a git una vez confirmado.
 - **Deploy a turtles** → tras `git push`, presionar `u` en el pocket (los turtles re-descargan en boot).
+- **README** → tras cualquier cambio mayor (feature, comando, archivo o flujo nuevo/cambiado), actualizar `README.md` como parte del mismo commit. No saltárselo.

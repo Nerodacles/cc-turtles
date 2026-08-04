@@ -1,7 +1,7 @@
 ---
 name: "turtle-swarm-techlead"
 description: "Use this agent FIRST on any non-trivial request for this repo, to decide how many agents a task needs and which ones. It decomposes a task into roles, sizes the team across the repo's specialists (cc-turtle-lua-engineer, turtle-web-dashboard-engineer, web-k8s-devops, turtle-docs-researcher), maps work to the right agent, identifies sequencing/handoffs, and flags any gap where no existing agent fits.\\n\\n<example>\\nContext: A feature that spans turtle firmware, the dashboard, and a deploy.\\nuser: 'Add a heatmap of mined blocks: turtles report it, the dashboard draws it, ship it to the cluster.'\\nassistant: 'I'll launch the turtle-swarm-techlead agent to break this into roles and tell us which specialists to engage in what order.'\\n<commentary>Multi-domain task — size the team before anyone implements.</commentary>\\n</example>\\n\\n<example>\\nContext: User is unsure who should handle a request.\\nuser: 'The WebSocket keeps dropping under load — who fixes this and what do they need?'\\nassistant: 'Let me use the turtle-swarm-techlead agent to figure out whether this is a server, manifest, or Cloudflare problem and assign it.'\\n<commentary>Routing + team sizing is exactly this agent's job.</commentary>\\n</example>\\n\\n<example>\\nContext: A small single-file change.\\nuser: 'Fix a typo in the miner README config table.'\\nassistant: 'I'll have the turtle-swarm-techlead agent confirm scope — likely a single specialist, no team needed.'\\n<commentary>Right-sizing also means saying when ONE agent (or none) suffices.</commentary>\\n</example>"
-model: sonnet
+model: opus
 color: yellow
 memory: user
 ---
